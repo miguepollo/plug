@@ -253,12 +253,107 @@ PATTERN_ROWS = [
     ("process", "medium", re.compile(r"execDetached|Process\s*\{|command:|subprocess|Popen|\bsh -c\b|\bbash -c\b")),
     ("fileWrite", "medium", re.compile(r"atomicWrites|\btee\b|\brm -rf?\b|>>\s*[\"'$/~]|os\.replace|shutil\.")),
     ("sensitive", "high", re.compile(r"\.ssh/|\.gnupg|\.aws|id_rsa|id_ed25519|/etc/(passwd|shadow|sudoers)|/root/|hosts\.yml|/\.env\b|Bitwarden|keyring|/proc/[0-9]")),
-    ("privilege", "high", re.compile(r"\bsudo\b|\bpkexec\b|\bdoas\b|\bpolkit\b|systemctl\s")),
+    # systemctl only counts when it changes something. `is-active`, `status`
+    # and the other read-only verbs need no privilege at all, and treating a
+    # health check as an escalation was the loudest false alarm here.
+    ("privilege", "high", re.compile(r"\bsudo\b|\bpkexec\b|\bdoas\b|\bpolkit\b"
+                                     r"|systemctl\s+(?!is-|status|show|list-|cat\b|--)")),
     ("obfuscation", "high", re.compile(r"atob\(|\bbase64 -d\b|base64 --decode|\beval\(|\bexec\(|\\u00[0-9a-fA-F]{2}\\u00")),
 ]
 
 PENALTY = {"network": (12, 30), "process": (4, 15), "fileWrite": (3, 10),
            "sensitive": (10, 30), "privilege": (20, 40), "obfuscation": (15, 30)}
+
+# Which line comment starts a comment, per file type. Block comments (/* */)
+# are handled for the C-style ones.
+LINE_COMMENT = {".qml": "//", ".js": "//", ".mjs": "//",
+                ".sh": "#", ".bash": "#", ".py": "#", ".lua": "--"}
+
+# A string assigned to one of these is shown to the user, not run. A plugin
+# whose panel explains "run `sudo systemctl enable ...` yourself" is describing
+# a privilege it deliberately does NOT take, and scoring that the same as
+# calling sudo punishes a plugin for being helpful.
+DISPLAY_PROP = re.compile(
+    r"\b(text|label|description|placeholder|hint|note|notice|tooltip|caption"
+    r"|summary|title|subtitle|heading|message|body)\w*\s*:")
+
+# A run of this many characters with nothing to break it up is what packed or
+# encoded content looks like. Long lines of comma-separated data — a coastline,
+# a lookup table — are long but never unbroken, and are not a smell.
+LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_-]{200,}")
+
+# Displayed text often runs over several lines — a ternary picking between two
+# messages, or a few strings joined together. A line that opens with one of
+# these is finishing the line above it, so it inherits its nature.
+CONTINUATION = re.compile(r"^\s*[?:+,.]")
+
+# Something on this line actually runs a command. A privileged word inside a
+# string next to one of these is a command being run; the same word in a string
+# with none of them nearby is a plugin quoting a command — the line it puts on
+# your clipboard, or prints for you to type. Both are worth knowing about;
+# only one of them is the plugin exercising the privilege.
+EXEC_CONSTRUCT = re.compile(
+    r"execDetached|Process\s*\{|command\s*:|subprocess|Popen|\brun\(|\bsystem\("
+    r"|\bsh\s+-c\b|\bbash\s+-c\b|\$\(|`")
+
+# What a mention costs, and the most all mentions together can cost. Nothing
+# like the real thing, but not free either: it is still in the source.
+MENTION_PENALTY = (1, 5)
+
+
+def split_line(line, lc, in_block):
+    """Split one source line into the part that executes and the strings it
+    contains, dropping comments entirely. Returns (code, strings, in_block).
+
+    The scan reads characters, so without this it cannot tell a capability
+    being used from one being mentioned: a comment describing a poll, or the
+    instructions a panel prints, read exactly like the real thing."""
+    code = []
+    strings = []
+    buf = []
+    quote = ""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if in_block:
+            if line[i:i + 2] == "*/":
+                in_block = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if quote:
+            if ch == "\\" and i + 1 < n:
+                buf.append(line[i:i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                strings.append("".join(buf))
+                buf = []
+                quote = ""
+                code.append(" ")
+                i += 1
+                continue
+            buf.append(ch)
+            i += 1
+            continue
+        if lc == "//" and line[i:i + 2] == "/*":
+            in_block = True
+            i += 2
+            continue
+        # A comment marker only starts a comment at the start of the line or
+        # after whitespace, so a URL fragment or ${#name} is left alone.
+        if lc and line.startswith(lc, i) and (i == 0 or line[i - 1].isspace()):
+            break
+        if ch in "\"'`":
+            quote = ch
+            i += 1
+            continue
+        code.append(ch)
+        i += 1
+    if quote:              # unterminated quote: keep what we read
+        strings.append("".join(buf))
+    return "".join(code), strings, in_block
 
 SCAN_EXT = (".qml", ".js", ".sh", ".py", ".bash", ".lua", ".mjs")
 
@@ -297,31 +392,55 @@ def scan_plugin(dirpath, only_files=None):
     capabilities present, and a few example lines per class — the material
     Claude is given, and a quick colour for the panel."""
     hits = {}          # class -> set of "rel:lineno" (unique lines)
+    mentions = {}      # class -> lines that only quote it, never run it
     examples = {}      # class -> list of {file, line, text}
     for rel, text in scan_files(dirpath, only_files):
+        ext = os.path.splitext(rel)[1].lower()
+        lc = LINE_COMMENT.get(ext, "#")
+        in_block = False
+        display_ctx = False
         for i, line in enumerate(text.split("\n"), 1):
-            if len(line) > 2000:  # a very long single line is itself a smell
+            code, strings, in_block = split_line(line, lc, in_block)
+            # Comments are gone; what a plugin merely prints goes with them.
+            if DISPLAY_PROP.search(code):
+                display_ctx = True
+            elif not (display_ctx and CONTINUATION.search(code)):
+                display_ctx = False
+            in_strings = "" if display_ctx else " ".join(strings)
+            runs = bool(EXEC_CONSTRUCT.search(code))
+            if len(line) > 2000 and LONG_TOKEN.search(line):
                 key = "%s:%d" % (rel, i)
                 hits.setdefault("obfuscation", set()).add(key)
             for cls, sev, rx in PATTERN_ROWS:
-                if rx.search(line):
-                    key = "%s:%d" % (rel, i)
-                    if key in hits.get(cls, set()):
-                        continue
-                    hits.setdefault(cls, set()).add(key)
-                    ex = examples.setdefault(cls, [])
-                    if len(ex) < MAX_FINDINGS_PER_CLASS:
-                        ex.append({"file": rel, "line": i,
-                                   "text": line.strip()[:200]})
+                in_code = bool(rx.search(code))
+                if not in_code and not (in_strings and rx.search(in_strings)):
+                    continue
+                key = "%s:%d" % (rel, i)
+                # A quoted command the plugin does not run is a mention.
+                bucket = hits if (in_code or runs) else mentions
+                if key in bucket.get(cls, set()):
+                    continue
+                bucket.setdefault(cls, set()).add(key)
+                ex = examples.setdefault(cls, [])
+                if len(ex) < MAX_FINDINGS_PER_CLASS:
+                    ex.append({"file": rel, "line": i,
+                               "quotedOnly": bucket is mentions,
+                               "text": line.strip()[:200]})
     score = 100
     caps = []
     for cls in hits:
         per, cap = PENALTY.get(cls, (3, 10))
         score -= min(cap, per * len(hits[cls]))
         caps.append(cls)
+    per, cap = MENTION_PENALTY
+    for cls in mentions:
+        score -= min(cap, per * len(mentions[cls]))
+        if cls not in caps:
+            caps.append(cls)
     return {"trustScore": max(0, score), "capabilities": sorted(caps),
             "examples": examples,
-            "counts": {c: len(hits[c]) for c in hits}}
+            "counts": {c: len(hits[c]) for c in hits},
+            "quotedOnly": {c: len(mentions[c]) for c in mentions}}
 
 
 # --------------------------------------------------------- catalog
@@ -773,6 +892,10 @@ def review(pid):
     scan = scan_plugin(dirpath)  # current-tree capabilities as context
     facts = {"trustScore": scan["trustScore"],
              "capabilities": scan["capabilities"],
+             # Told apart so the reviewer knows which of these the plugin
+             # actually does and which it only quotes in its own text.
+             "runs": scan.get("counts", {}),
+             "quotedOnly": scan.get("quotedOnly", {}),
              "commitsBehind": up["commitsBehind"]}
     verdict = run_agent(diff, facts, name)
     out = {"id": pid, "name": name, "fromSha": gs["sha"],

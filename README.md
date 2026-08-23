@@ -15,7 +15,10 @@ in plain English, whether it is safe to apply.
 
 - **Installed** — every community plugin you have, each row with the same four
   controls in the same place: **update**, **restore**, **remove** and an
-  **on/off** switch, plus a trust dot from a quick capability scan. The update
+  **on/off** switch, plus a trust dot from a quick capability scan — which
+  reads only the code that runs, ignoring comments and the text a plugin
+  displays, and counts a command a plugin merely quotes for you to copy far
+  more lightly than one it runs itself. The update
   control lights **green** the moment the plugin's repository has moved past
   what you installed; restore lights up once Plug has applied an update it can
   undo. Laid out two-up to save space, with a folded **Official** section for
