@@ -2,11 +2,14 @@
   "schemaVersion": 1,
   "id": "io.github.weedwhitesandwine.plug",
   "name": "Plug",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "weedwhitesandwine",
   "license": "MIT",
-  "description": "Manage your community Omarchy plugins in one place: toggle, remove, and browse the marketplace — and never apply an update blind. Every update is flagged, and an AI reviewer of your choice reads the exact changes and tells you in plain English whether it is safe. Summon with: omarchy-shell shell toggle io.github.weedwhitesandwine.plug",
-  "kinds": ["panel", "bar-widget"],
+  "description": "Manage all your plugins, catch every update, and have AI scan the code BEFORE you update or install.",
+  "kinds": [
+    "panel",
+    "bar-widget"
+  ],
   "entryPoints": {
     "panel": "Panel.qml",
     "barWidget": "BarWidget.qml"

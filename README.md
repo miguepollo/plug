@@ -1,7 +1,6 @@
 # Plug
 
-**One place to manage your community Omarchy plugins — and never install or
-update one blind.**
+**Manage all your plugins, catch every update, and have AI scan the code BEFORE you update or install.**
 
 ![Plug](preview.png)
 
