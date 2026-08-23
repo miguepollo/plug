@@ -363,6 +363,34 @@ PY
         [[ -n $err ]] || err="omarchy plugin remove failed"
       fi
     fi
+    # A removed plugin leaves nothing of ours behind: its review record and
+    # its restore bookkeeping go with it, rather than sitting in the state
+    # directory for the rest of the machine's life.
+    if [[ -z $err ]]; then
+      python3 - "$id" <<'CLEANUP' || true
+import json, os, re, sys
+pid = sys.argv[1]
+state = os.path.join(os.environ.get("XDG_STATE_HOME") or
+                     os.path.expanduser("~/.local/state"), "plug")
+stem = re.sub(r"[^A-Za-z0-9._-]", "_", pid)
+for name in ("review-%s.json" % stem,):
+    try:
+        os.unlink(os.path.join(state, name))
+    except OSError:
+        pass
+hist = os.path.join(state, "locks.json")
+try:
+    with open(hist) as fh:
+        d = json.load(fh)
+    if isinstance(d, dict) and d.pop(pid, None) is not None:
+        tmp = hist + ".prune"
+        with open(tmp, "w") as fh:
+            json.dump(d, fh)
+        os.replace(tmp, hist)
+except Exception:
+    pass
+CLEANUP
+    fi
     if [[ -n $err ]]; then finish "$id" "" "$err"; else finish "" "Removed $id" ""; fi
     ;;
   apply | rollback)
