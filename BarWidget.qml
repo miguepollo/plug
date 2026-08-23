@@ -20,13 +20,13 @@ Ui.BarWidget {
   readonly property int updateCount: PlugState.updateCount
   readonly property bool opened: PlugState.overlay ? PlugState.overlay.opened === true : false
 
-  function open() { if (PlugState.overlay) PlugState.overlay.open("{}") }
-  function close() { if (PlugState.overlay) PlugState.overlay.close() }
-  function toggle() {
-    if (!PlugState.overlay) return
-    if (PlugState.overlay.opened) PlugState.overlay.close()
-    else PlugState.overlay.open("{}")
-  }
+  // Clicking runs the same shell toggle route the panel is summoned by. This
+  // works even before the panel has ever been opened — the shell instantiates
+  // it — whereas calling the panel object directly would do nothing on a fresh
+  // install, because that object does not exist until the panel first loads.
+  function toggle() { root.bar.run("omarchy-shell shell toggle io.github.weedwhitesandwine.plug") }
+  function open() { root.toggle() }
+  function close() { root.toggle() }
 
   Ui.BarIconButton {
     id: button
@@ -37,11 +37,7 @@ Ui.BarWidget {
     tooltipText: root.updateCount > 0
       ? ("Plug — " + root.updateCount + " update" + (root.updateCount === 1 ? "" : "s") + " waiting")
       : "Plug"
-    onPressed: function(b) {
-      if (!PlugState.overlay) return
-      if (PlugState.overlay.opened) PlugState.overlay.close()
-      else PlugState.overlay.open("{}")
-    }
+    onPressed: function(b) { root.toggle() }
   }
 
   // The update badge — a small dot with a count, only when something is
