@@ -27,6 +27,34 @@ import "."
 Item {
   id: root
 
+  // A file this plugin reads but does not own can be anything by the time it
+  // is opened: a link pointing elsewhere, a pipe that never produces anything,
+  // or something far too large. `head` opens a path the ordinary way and would
+  // follow the first and wait forever on the second, inside a shell process
+  // that stays up for days. So the open itself refuses — no links, no waiting,
+  // nothing that is not a plain file — and hands back nothing at all rather
+  // than something over the ceiling.
+  readonly property string safeRead: [
+    'import os, stat, sys',
+    'path = sys.argv[1]; ceiling = int(sys.argv[2])',
+    'try:',
+    '    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)',
+    'except OSError:',
+    '    raise SystemExit',
+    'try:',
+    '    if not stat.S_ISREG(os.fstat(fd).st_mode):',
+    '        raise SystemExit',
+    '    with os.fdopen(fd, "rb") as handle:',
+    '        raw = handle.read(ceiling + 1)',
+    'finally:',
+    '    try:',
+    '        os.close(fd)',
+    '    except OSError:',
+    '        pass',
+    'if len(raw) <= ceiling:',
+    '    sys.stdout.buffer.write(raw)'
+  ].join("\n")
+
   property bool opened: false
   readonly property string selfId: "io.github.weedwhitesandwine.plug"
 
@@ -335,7 +363,8 @@ Item {
   function readState() { stateReader.running = false; stateReader.running = true }
   Process {
     id: stateReader
-    command: ["head", "-c", String(root.stateCeiling), "--", root.stateDir + "/state.json"]
+    command: ["python3", "-c", root.safeRead,
+              root.stateDir + "/state.json", String(root.stateCeiling)]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -484,7 +513,8 @@ Item {
   readonly property int catalogCeiling: 8 * 1024 * 1024
   Process {
     id: catalogReader
-    command: ["head", "-c", String(root.catalogCeiling), "--", root.stateDir + "/catalog.json"]
+    command: ["python3", "-c", root.safeRead,
+              root.stateDir + "/catalog.json", String(root.catalogCeiling)]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -583,7 +613,8 @@ Item {
   function loadSettings() { settingsReader.running = false; settingsReader.running = true }
   Process {
     id: settingsReader
-    command: ["head", "-c", "65536", "--", root.stateDir + "/settings.json"]
+    command: ["python3", "-c", root.safeRead,
+              root.stateDir + "/settings.json", "65536"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
