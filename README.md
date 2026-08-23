@@ -35,9 +35,14 @@ in plain English, whether it is safe to apply.
 - **Restore** — undo the last update you applied, returning the plugin to the
   version it was on before. Plug then flags the update as available again, so
   nothing is lost — you can re-apply it whenever you are ready.
-- **Store** — search the community marketplace and install with one click.
-  Omarchy's built-in plugins appear here too, marked **OFFICIAL** and shown for
-  discovery only.
+- **Store** — search the community marketplace, and **read a plugin before you
+  install it**. Pressing install does not install: Plug clones the plugin to a
+  throwaway directory, scans what it can do, has your reviewer read the whole
+  source, and tells you plainly whether it looks safe — then you decide, with
+  the button reading **Install anyway** if the answer was no. The copy is
+  deleted either way, and nothing in it is ever run. Double-click a row to open
+  the plugin's own repository page. Omarchy's built-in plugins appear here too,
+  marked **OFFICIAL** and shown for discovery only.
 
 ## Choosing your reviewer
 
@@ -112,6 +117,7 @@ version each applied update came from).
 | `~/.config/hypr/bindings.lua` | only when you set or clear a hotkey, and only Plug's own marked block, between `-- >>> plug hotkey` and `-- <<< plug hotkey` |
 | `~/.config/omarchy/shell.json` | only when you show or hide the bar icon, and only Plug's own `{"id": …}` entry |
 | a plugin's own checkout under `~/.config/omarchy/plugins/…` | standard git operations (`fetch`, fast-forward, and `reset` for a revert) when you update or roll back **that** plugin |
+| a temporary directory | a shallow clone of a plugin you asked Plug to check before installing, read and then deleted |
 
 **Commands it runs:** `omarchy-shell shell listPlugins` / `listShellConfig` /
 `setPluginEnabled` (read the list and your shell config; enable/disable on your
@@ -126,6 +132,7 @@ either its command (`claude` / `codex` / `gemini`) or a request to a local
 server on `localhost`.
 
 **Network:** each installed plugin's git remote, to check for and fetch updates;
+the repository of a store plugin you ask Plug to check before installing;
 the marketplace catalog on `raw.githubusercontent.com`; and, when you review an
 update with a cloud agent, that provider — never otherwise. A local-server
 reviewer stays on `localhost`.

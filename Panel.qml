@@ -109,6 +109,12 @@ Item {
   property string reviewId: ""
   property var reviewData: null
   property bool reviewRunning: false
+  // The same overlay serves two questions: "should I apply this update?" and
+  // "should I install this at all?". A plugin runs as you with no sandbox, so
+  // the first time its code arrives deserves the same read as every change to
+  // it afterwards.
+  property string reviewMode: "update"      // update | install
+  property var installCandidate: null
 
   // Settings, loaded from the engine's settings.json.
   property var settings: ({ reviewAgent: "claude", reviewModel: "sonnet", autoCheck: true })
@@ -386,12 +392,22 @@ Item {
 
   function approveUpdate() {
     if (!root.reviewId) return
+    if (root.reviewMode === "install") {
+      var c = root.installCandidate
+      root.cancelReview()
+      if (c && c.repo) root.runJob(["install", c.repo + ".git", c.name],
+                                   "Installing " + c.name + "…")
+      return
+    }
     var id = root.reviewId
     root.reviewId = ""; root.reviewData = null
     root.runJob(["apply", id], "Applying update…")
   }
 
-  function cancelReview() { root.reviewId = ""; root.reviewData = null; root.reviewRunning = false }
+  function cancelReview() {
+    root.reviewId = ""; root.reviewData = null; root.reviewRunning = false
+    root.reviewMode = "update"; root.installCandidate = null
+  }
 
   // Undo the last applied update — the version to return to was recorded when
   // the update was applied.
@@ -458,9 +474,56 @@ Item {
     return n
   }
 
+  // Open a catalog entry's own repository page. The catalog is fetched from
+  // the internet, so its addresses are data: each one is checked against a
+  // plain https shape before it is handed over, and it is passed as an
+  // argument rather than through a shell, so nothing else can be opened.
+  readonly property var repoUrlPattern:
+    /^https:\/\/[A-Za-z0-9._~-]+(\.[A-Za-z0-9._~-]+)+(\/[A-Za-z0-9._~%\/-]*)?$/
+  function openRepo(c) {
+    if (!c || !c.repo) return
+    var u = String(c.repo)
+    if (u.length > 300 || !root.repoUrlPattern.test(u)) {
+      root.noticeText = "No usable repository address for " + (c.name || "that plugin")
+      return
+    }
+    Quickshell.execDetached(["xdg-open", u])
+    root.noticeText = "Opened " + (c.name || u) + " in your browser"
+  }
+
+  // Read it before it lands. plugd clones the plugin to a throwaway
+  // directory, scans it, has the reviewer read the whole source, and deletes
+  // the clone — nothing is installed and nothing in it is ever run.
   function installFromStore(c) {
-    if (!c.repo) return
-    root.runJob(["install", c.repo + ".git", c.name], "Installing " + c.name + "…")
+    if (!c || !c.repo) return
+    root.reviewMode = "install"
+    root.installCandidate = c
+    root.reviewId = c.id || c.name || "plugin"
+    root.reviewData = null
+    root.reviewRunning = true
+    inspectProc.command = ["python3", root.pluginDir + "/plugd.py", "inspect", c.repo]
+    inspectProc.running = false; inspectProc.running = true
+  }
+  Process {
+    id: inspectProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var d = JSON.parse(text)
+          if (d && d.review) root.reviewData = d
+          else if (d && d.error) {
+            root.noticeText = "Could not check it: " + d.error
+            root.cancelReview()
+          }
+        } catch (e) {
+          root.noticeText = "Could not read the check result"
+          root.cancelReview()
+        }
+      }
+    }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: root.reviewRunning = false
   }
 
   // ------------------------------------------------------------------ settings
@@ -863,7 +926,7 @@ Item {
 
           // ===== STORE =====
           Column {
-            visible: root.tab === "store"
+            visible: root.tab === "store" && root.reviewId === ""
             anchors.fill: parent
             spacing: Style.space(8)
 
@@ -1018,9 +1081,10 @@ Item {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             text: root.noticeText !== "" ? root.noticeText
-                : root.reviewId !== "" ? "Enter apply · Esc back"
+                : root.reviewId !== "" ? (root.reviewMode === "install"
+                    ? "Enter install · Esc cancel" : "Enter apply · Esc back")
                 : root.tab === "installed" ? "↑↓ move · Enter review/toggle · x remove · Tab switch view · Esc close"
-                : root.tab === "store" ? "type to search · Tab switch view · Esc clear/close"
+                : root.tab === "store" ? "type to search · double-click a plugin to open its repo · Tab switch view · Esc clear/close"
                 : "Tab switch view · Esc close"
             textFormat: Text.PlainText
             color: root.dim
@@ -1314,7 +1378,15 @@ Item {
       ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
       : "transparent"
     border.color: root.hairline; border.width: 1
-    MouseArea { id: sHover; anchors.fill: parent; hoverEnabled: true }
+    // Double-click opens the plugin's repository — the page you would want
+    // before installing something that runs as you. A single click is left
+    // alone so it cannot happen by accident on the way to the install button.
+    MouseArea {
+      id: sHover
+      anchors.fill: parent
+      hoverEnabled: true
+      onDoubleClicked: root.openRepo(cData)
+    }
     Row {
       anchors.left: parent.left
       anchors.leftMargin: Style.space(10)
@@ -1331,7 +1403,17 @@ Item {
         spacing: Style.space(2)
         Row {
           spacing: Style.space(6)
-          Text { text: cData ? cData.name : ""; textFormat: Text.PlainText; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+          Text {
+            text: cData ? cData.name : ""
+            textFormat: Text.PlainText
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            // Underlined while the row is under the cursor, so the link is
+            // discoverable rather than a secret.
+            font.underline: sHover.containsMouse && cData && cData.repo
+          }
           // Omarchy's own — clearly marked, and never installed or managed here.
           Rectangle {
             visible: cData && cData.official
@@ -1384,7 +1466,9 @@ Item {
         PlugButton { label: "‹ back"; onPicked: root.cancelReview() }
         Text {
           anchors.verticalCenter: parent.verticalCenter
-          text: "Review: " + root.reviewId
+          text: (root.reviewMode === "install" ? "Before installing: " : "Review: ")
+                + (root.reviewMode === "install" && root.installCandidate
+                   ? root.installCandidate.name : root.reviewId)
           textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
@@ -1401,8 +1485,16 @@ Item {
         width: parent.width; height: Style.space(80)
         Text {
           anchors.centerIn: parent
-          text: (root.settings.reviewAgent === "none" ? "Scanning the changes…" :
-                 "Asking " + root.settings.reviewAgent + " to read the changes…")
+          text: {
+            var what = root.reviewMode === "install"
+              ? "the plugin's code" : "the changes"
+            if (root.reviewMode === "install" && !root.reviewData)
+              return root.settings.reviewAgent === "none"
+                ? "Fetching a copy and scanning it…"
+                : "Fetching a copy and asking " + root.settings.reviewAgent + " to read it…"
+            return root.settings.reviewAgent === "none" ? "Scanning " + what + "…"
+                 : "Asking " + root.settings.reviewAgent + " to read " + what + "…"
+          }
           textFormat: Text.PlainText
           color: root.dim
           font.family: root.fontFamily
@@ -1545,8 +1637,17 @@ Item {
 
         Row {
           spacing: Style.space(8)
-          PlugButton { label: "Apply update"; onPicked: root.approveUpdate() }
-          PlugButton { label: "Not now"; onPicked: root.cancelReview() }
+          PlugButton {
+            label: root.reviewMode !== "install" ? "Apply update"
+                 : (root.reviewData && root.reviewData.review
+                    && root.reviewData.review.verdict === "DANGER") ? "Install anyway"
+                 : "Install"
+            danger: root.reviewMode === "install" && root.reviewData
+                    && root.reviewData.review
+                    && root.reviewData.review.verdict === "DANGER"
+            onPicked: root.approveUpdate()
+          }
+          PlugButton { label: root.reviewMode === "install" ? "Cancel" : "Not now"; onPicked: root.cancelReview() }
         }
       }
     }

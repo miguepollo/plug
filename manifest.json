@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.weedwhitesandwine.plug",
   "name": "Plug",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "weedwhitesandwine",
   "license": "MIT",
   "description": "Manage your community Omarchy plugins in one place: toggle, remove, and browse the marketplace — and never apply an update blind. Every update is flagged, and an AI reviewer of your choice reads the exact changes and tells you in plain English whether it is safe. Summon with: omarchy-shell shell toggle io.github.weedwhitesandwine.plug",
