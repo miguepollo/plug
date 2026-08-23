@@ -188,6 +188,12 @@ def write_atomic(path, obj):
 # --------------------------------------------------------------- git
 
 def git(dirpath, *args, timeout=GIT_TIMEOUT, cap=MAX_GIT_BYTES):
+    """The common form: the output, without the truncation flag."""
+    code, text, err, _ = git_capped(dirpath, *args, timeout=timeout, cap=cap)
+    return code, text, err
+
+
+def git_capped(dirpath, *args, timeout=GIT_TIMEOUT, cap=MAX_GIT_BYTES):
     """Run one git command in a plugin directory with the repository's own
     hooks and config kept out of the way — a plugin's checkout is untrusted,
     and a hook or an -c alias must never run just because we inspected it.
@@ -223,20 +229,21 @@ def git(dirpath, *args, timeout=GIT_TIMEOUT, cap=MAX_GIT_BYTES):
                 proc.kill()
             proc.stderr.close()
             code = proc.wait(timeout=5)
-        text = (out or b"").decode("utf-8", "replace")
-        # `head` closing the pipe at the ceiling kills git with SIGPIPE, so a
-        # non-zero status here means "there was more than we asked for", not
-        # "the command failed". Reporting that as a failure is worse than the
-        # unbounded read it replaced: an enormous diff would come back empty,
-        # and empty reads as "nothing changed" — which is exactly the answer a
-        # hostile update would want. Truncation is success, and it is flagged.
-        truncated = len(text) >= cap
+        data = out or b""
+        # Measured in bytes, because `head -c` cuts bytes. Counting the
+        # characters they decode to is not the same number: any non-ASCII
+        # makes the string shorter than the cut, the cut goes unnoticed, git's
+        # kill status stands, and the diff comes back empty — which reads as
+        # "nothing changed". A single accented character in a large update was
+        # enough to have it approved as harmless.
+        truncated = len(data) >= cap
+        text = data.decode("utf-8", "replace")
         if truncated:
             code = 0
         return (code, text.strip() if not truncated else text,
-                (err or b"").decode("utf-8", "replace").strip())
+                (err or b"").decode("utf-8", "replace").strip(), truncated)
     except (OSError, subprocess.SubprocessError):
-        return 1, "", "git invocation failed"
+        return 1, "", "git invocation failed", False
 
 
 def is_git_repo(dirpath):
@@ -283,25 +290,20 @@ def check_upstream(dirpath, st):
     return result
 
 
-def git_truncated(text, cap):
-    """Did this output come back at the ceiling, i.e. cut short?"""
-    return len(text) >= cap
-
-
 def diff_text(dirpath, from_sha, to_ref):
     """The incoming change, as unified diff text, capped. This is the exact
     thing a human — or Claude — would need to read to judge an update."""
-    code, out, _ = git(dirpath, "-c", "core.pager=cat", "diff", "--no-color",
-                       "%s..%s" % (from_sha, to_ref), cap=MAX_DIFF_BYTES)
+    code, out, _, truncated = git_capped(
+        dirpath, "-c", "core.pager=cat", "diff", "--no-color",
+        "%s..%s" % (from_sha, to_ref), cap=MAX_DIFF_BYTES)
     if code != 0:
         return ""
-    if git_truncated(out, MAX_DIFF_BYTES):
+    if truncated:
         # Say so in the text itself: the reviewer must not mistake a cut-off
         # diff for a complete one, and the panel shows what it was given.
-        out = (out[:MAX_DIFF_BYTES]
-               + "\n\n[This update is larger than %d bytes. Everything above is "
-                 "the first part of it; the rest was not read. Treat anything "
-                 "you cannot see as unreviewed.]" % MAX_DIFF_BYTES)
+        out += ("\n\n[This update is larger than %d bytes. Everything above is "
+                "the first part of it; the rest was not read. Treat anything "
+                "you cannot see as unreviewed.]" % MAX_DIFF_BYTES)
     return out
 
 
@@ -337,23 +339,10 @@ PENALTY = {"network": (12, 30), "process": (4, 15), "fileWrite": (3, 10),
 LINE_COMMENT = {".qml": "//", ".js": "//", ".mjs": "//",
                 ".sh": "#", ".bash": "#", ".py": "#", ".lua": "--"}
 
-# A string assigned to one of these is shown to the user, not run. A plugin
-# whose panel explains "run `sudo systemctl enable ...` yourself" is describing
-# a privilege it deliberately does NOT take, and scoring that the same as
-# calling sudo punishes a plugin for being helpful.
-DISPLAY_PROP = re.compile(
-    r"\b(text|label|description|placeholder|hint|note|notice|tooltip|caption"
-    r"|summary|title|subtitle|heading|message|body)\w*\s*:")
-
 # A run of this many characters with nothing to break it up is what packed or
 # encoded content looks like. Long lines of comma-separated data — a coastline,
 # a lookup table — are long but never unbroken, and are not a smell.
 LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_-]{200,}")
-
-# Displayed text often runs over several lines — a ternary picking between two
-# messages, or a few strings joined together. A line that opens with one of
-# these is finishing the line above it, so it inherits its nature.
-CONTINUATION = re.compile(r"^\s*[?:+,.]")
 
 # Something on this line actually runs a command. A privileged word inside a
 # string next to one of these is a command being run; the same word in a string
@@ -362,7 +351,13 @@ CONTINUATION = re.compile(r"^\s*[?:+,.]")
 # only one of them is the plugin exercising the privilege.
 EXEC_CONSTRUCT = re.compile(
     r"execDetached|Process\s*\{|command\s*:|subprocess|Popen|\brun\(|\bsystem\("
-    r"|\bsh\s+-c\b|\bbash\s+-c\b|\$\(|`")
+    r"|\bsh\s+-c\b|\bbash\s+-c\b")
+
+# Command substitution, which is execution in a shell and ordinary string
+# interpolation in QML or JavaScript. Asking the shell question of a QML
+# template literal marks a plugin down for formatting a string.
+SHELL_EXEC = re.compile(r"\$\(|`")
+SHELL_EXT = (".sh", ".bash")
 
 # What a mention costs, and the most all mentions together can cost. Nothing
 # like the real thing, but not free either: it is still in the source.
@@ -371,7 +366,11 @@ MENTION_PENALTY = (1, 5)
 
 def split_line(line, lc, in_block):
     """Split one source line into the part that executes and the strings it
-    contains, dropping comments entirely. Returns (code, strings, in_block).
+    contains, dropping comments entirely. Returns
+    (code, strings, in_block, without_comment) — the last being the line as
+    written with only the comment removed, quote characters and all, because
+    a backtick and a `$(` are themselves the evidence that a line runs
+    something and both are lost once the quoting is taken apart.
 
     The scan reads characters, so without this it cannot tell a capability
     being used from one being mentioned: a comment describing a poll, or the
@@ -421,7 +420,7 @@ def split_line(line, lc, in_block):
         i += 1
     if quote:              # unterminated quote: keep what we read
         strings.append("".join(buf))
-    return "".join(code), strings, in_block
+    return "".join(code), strings, in_block, line[:i]
 
 SCAN_EXT = (".qml", ".js", ".sh", ".py", ".bash", ".lua", ".mjs")
 
@@ -465,30 +464,39 @@ def scan_plugin(dirpath, only_files=None):
     for rel, text in scan_files(dirpath, only_files):
         ext = os.path.splitext(rel)[1].lower()
         lc = LINE_COMMENT.get(ext, "#")
+        shell = ext in SHELL_EXT
         in_block = False
-        display_ctx = False
         for i, line in enumerate(text.split("\n"), 1):
-            code, strings, in_block = split_line(line, lc, in_block)
-            # Comments are gone; what a plugin merely prints goes with them.
-            if DISPLAY_PROP.search(code):
-                display_ctx = True
-            elif not (display_ctx and CONTINUATION.search(code)):
-                display_ctx = False
-            in_strings = "" if display_ctx else " ".join(strings)
-            runs = bool(EXEC_CONSTRUCT.search(code))
+            code, strings, in_block, uncommented = split_line(line, lc, in_block)
+            quoted = strings[0] if len(strings) == 1 else " ".join(strings)
+            key = "%s:%d" % (rel, i)
+            # Whether the line runs something is only asked once a pattern has
+            # matched, which is a small fraction of lines. In a shell file it
+            # is asked of the line as written, because a backtick is itself a
+            # quote character and `$(…)` sits inside double quotes — a line
+            # taken apart by its quoting no longer contains the marks that say
+            # it runs something.
+            runs = None
             if len(line) > 2000 and LONG_TOKEN.search(line):
-                key = "%s:%d" % (rel, i)
                 hits.setdefault("obfuscation", set()).add(key)
+            # Nothing is ever suppressed: a string that is not executed is
+            # counted lightly, never dropped. Suppressing displayed text meant
+            # a call prefixed with `text:` or `title:` disappeared from the
+            # scan altogether, which is a worse fault than the false positive
+            # it was added to fix.
             for cls, sev, rx in PATTERN_ROWS:
                 in_code = bool(rx.search(code))
-                if not in_code and not (in_strings and rx.search(in_strings)):
+                if not in_code and not rx.search(quoted):
                     continue
-                key = "%s:%d" % (rel, i)
+                if runs is None:
+                    runs = bool(EXEC_CONSTRUCT.search(code)
+                                or (shell and SHELL_EXEC.search(uncommented)))
                 # A quoted command the plugin does not run is a mention.
                 bucket = hits if (in_code or runs) else mentions
-                if key in bucket.get(cls, set()):
+                seen = bucket.setdefault(cls, set())
+                if key in seen:
                     continue
-                bucket.setdefault(cls, set()).add(key)
+                seen.add(key)
                 ex = examples.setdefault(cls, [])
                 if len(ex) < MAX_FINDINGS_PER_CLASS:
                     ex.append({"file": rel, "line": i,
@@ -856,17 +864,26 @@ def openai_chat(base, model, system, user):
     return ""
 
 
+def truncate_bytes(text, limit, note):
+    """Cut text to a budget measured in bytes — the unit every limit here is
+    actually expressed in — and say in the text itself that it was cut."""
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text
+    room = max(0, limit - len(note.encode("utf-8")))
+    return data[:room].decode("utf-8", "ignore") + note
+
+
 def arg_prompt(text):
     """A prompt that has to travel as a command-line argument, trimmed to fit
     the operating system's limit and told plainly that it was trimmed. Without
     this the command fails outright on a large change and the review quietly
     degrades to the machine scan."""
-    if len(text) <= MAX_PROMPT_ARG_BYTES:
-        return text
-    return (text[:MAX_PROMPT_ARG_BYTES]
-            + "\n\n[Cut off here: this change is too large to hand to this "
-              "reviewer in one piece. Everything beyond this point is "
-              "unreviewed — say so in WATCH FOR.]")
+    return truncate_bytes(
+        text, MAX_PROMPT_ARG_BYTES,
+        "\n\n[Cut off here: this change is too large to hand to this "
+        "reviewer in one piece. Everything beyond this point is "
+        "unreviewed — say so in WATCH FOR.]")
 
 
 def run_agent(diff, scan_facts, plugin_name, context="update"):
