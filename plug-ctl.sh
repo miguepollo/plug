@@ -317,16 +317,93 @@ if isinstance(d, dict) and d.get("error"):
     if [[ -n $err ]]; then finish "$id" "" "$err"; else finish "$id" "$note" ""; fi
     ;;
   install)
+    # install <url> <name> <reviewed-sha> <plugin-id> [--approved-version]
+    #
+    # What the reviewer read was one exact commit. A repository address is not
+    # a commit — it is a pointer, and it can point somewhere else by the time
+    # anything downloads it. So the repository is asked what it is at now,
+    # without downloading it, and nothing is installed unless the answer is the
+    # commit that was read. If it has moved, nothing lands on the disk at all;
+    # the panel says so and offers the version that was approved, which comes
+    # back here with --approved-version and is pinned after the install.
     url="$2"
     name="${3:-$2}"
+    sha="${4:-}"
+    pid="${5:-}"
+    mode="${6:-}"
     [[ -n $url ]] || exit 2
     err=""
-    if out=$(omarchy plugin add "$url" --enable --yes 2>&1); then
-      :
-    else
-      err=$(last_line "$out")
-      [[ -n $err ]] || err="omarchy plugin add failed"
+    moved=""
+
+    if [[ -n $sha ]]; then
+      now=$(python3 "$DIR/plugd.py" still-at "$url" "$sha" 2>/dev/null |
+        python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print("unreachable"); raise SystemExit
+if not d.get("reachable"): print("unreachable")
+elif d.get("same"): print("same")
+else: print(d.get("now") or "unknown")')
+      case "$now" in
+        same) : ;;
+        unreachable) err="could not reach the repository to check it" ;;
+        *)
+          if [[ $mode != "--approved-version" ]]; then
+            # Nothing is installed. The panel decides what to offer.
+            moved="$now"
+          fi
+          ;;
+      esac
     fi
+
+    if [[ -n $moved ]]; then
+      finish "" "" "MOVED $name $moved"
+      exit 0
+    fi
+
+    if [[ -z $err ]]; then
+      # The approved version may not be the branch tip any more, so it is
+      # installed switched off and pinned before anything is allowed to run.
+      add_args=("$url" --yes)
+      [[ $mode == "--approved-version" ]] || add_args+=(--enable)
+      if out=$(omarchy plugin add "${add_args[@]}" 2>&1); then :; else
+        err=$(last_line "$out")
+        [[ -n $err ]] || err="omarchy plugin add failed"
+      fi
+    fi
+
+    # Backstop: whatever the checks above concluded, what actually landed is
+    # what matters. If it is not the reviewed commit, pin it to that commit;
+    # if it cannot be pinned, remove it rather than leave unreviewed code
+    # installed.
+    if [[ -z $err && -n $sha && -n $pid ]]; then
+      d="$HOME/.config/omarchy/plugins/$pid"
+      if [[ -d $d/.git ]]; then
+        head=$(git -C "$d" rev-parse HEAD 2>/dev/null || echo "")
+        if [[ $head != "$sha" ]]; then
+          if git -C "$d" cat-file -t "$sha" >/dev/null 2>&1 &&
+             git -C "$d" reset --hard "$sha" >/dev/null 2>&1 &&
+             [[ $(git -C "$d" rev-parse HEAD 2>/dev/null) == "$sha" ]]; then
+            :
+          else
+            omarchy plugin remove "$pid" --yes >/dev/null 2>&1 || true
+            err="what arrived was not the version you approved — nothing was installed"
+          fi
+        fi
+        if [[ -z $err && $mode == "--approved-version" ]]; then
+          # Pinning rewrote files inside the plugin folder, and the shell
+          # disables a plugin whose files change under it. So switching it on
+          # has to come after that settles, and has to be confirmed rather
+          # than assumed — the first attempt can be undone a moment later.
+          for i in 1 2 3 4 5 6; do
+            sleep 0.6
+            is_on "$pid" && break
+            out=$(omarchy-shell shell setPluginEnabled "$pid" true 2>&1) || true
+          done
+          is_on "$pid" || err="installed at the version you approved, but it could not be switched on — turn it on from the list"
+        fi
+      fi
+    fi
+
     if [[ -n $err ]]; then finish "" "" "$err"; else finish "" "Installed $name" ""; fi
     ;;
   enable | disable)

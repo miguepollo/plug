@@ -102,6 +102,13 @@ MAX_DIFF_BYTES = 512 * 1024
 MAX_SCAN_FILES = 400
 MAX_FINDINGS_PER_CLASS = 20
 GIT_TIMEOUT = 25
+# What any single git command may hand back. A diff has its own, larger
+# ceiling; everything else here is a sha, a ref or a short list.
+MAX_GIT_BYTES = 256 * 1024
+# What a candidate plugin's clone may occupy on disk. Checked while the clone
+# runs, so a repository that keeps growing is stopped rather than measured
+# afterwards.
+MAX_CLONE_BYTES = 64 * 1024 * 1024
 # Cloning a stranger's repository to read it: longer than a local git call,
 # short enough that a repository that will not answer does not hold the panel.
 CLONE_TIMEOUT = 90
@@ -111,6 +118,14 @@ CLAUDE_TIMEOUT = 180
 # panel renders it inside a shell process that stays up for days, so a reply
 # that never stops must not be held whole on the way there.
 MAX_AGENT_BYTES = 512 * 1024
+# A prompt handed to a command as an argument has to fit in the operating
+# system's limit on arguments — about 128 KB for a single one. A diff big
+# enough to matter goes straight past that, and the review then fails and
+# falls back to the machine scan: the larger and more suspicious a change, the
+# weaker the check it would get. So the prompt goes in on standard input,
+# which has no such limit, and only an agent that cannot read standard input
+# gets a trimmed copy.
+MAX_PROMPT_ARG_BYTES = 96 * 1024
 
 
 # --------------------------------------------------------------- hygiene
@@ -172,20 +187,54 @@ def write_atomic(path, obj):
 
 # --------------------------------------------------------------- git
 
-def git(dirpath, *args, timeout=GIT_TIMEOUT):
+def git(dirpath, *args, timeout=GIT_TIMEOUT, cap=MAX_GIT_BYTES):
     """Run one git command in a plugin directory with the repository's own
     hooks and config kept out of the way — a plugin's checkout is untrusted,
-    and a hook or an -c alias must never run just because we inspected it."""
+    and a hook or an -c alias must never run just because we inspected it.
+
+    Output is capped while it is being read, not after: the repository belongs
+    to somebody else, and a diff or a log it chooses to make enormous must not
+    be accumulated whole before anything gets to reject it."""
     cmd = ["git", "-C", dirpath,
            "-c", "core.hooksPath=/dev/null",
            "-c", "protocol.ext.allow=never",
            "-c", "protocol.file.allow=user"]
     cmd += list(args)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0",
+           "GIT_CONFIG_NOSYSTEM": "1", "HOME": HOME}
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0",
-                                "GIT_CONFIG_NOSYSTEM": "1", "HOME": HOME})
-        return r.returncode, r.stdout.strip(), r.stderr.strip()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env)
+        try:
+            # `head -c` closes the pipe at the ceiling; git then takes SIGPIPE
+            # rather than filling memory here.
+            capper = subprocess.Popen(["head", "-c", str(cap)],
+                                      stdin=proc.stdout, stdout=subprocess.PIPE)
+            proc.stdout.close()
+            try:
+                out, _ = capper.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                capper.kill()
+                out, _ = capper.communicate()
+                raise
+            err = proc.stderr.read(64 * 1024)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.stderr.close()
+            code = proc.wait(timeout=5)
+        text = (out or b"").decode("utf-8", "replace")
+        # `head` closing the pipe at the ceiling kills git with SIGPIPE, so a
+        # non-zero status here means "there was more than we asked for", not
+        # "the command failed". Reporting that as a failure is worse than the
+        # unbounded read it replaced: an enormous diff would come back empty,
+        # and empty reads as "nothing changed" — which is exactly the answer a
+        # hostile update would want. Truncation is success, and it is flagged.
+        truncated = len(text) >= cap
+        if truncated:
+            code = 0
+        return (code, text.strip() if not truncated else text,
+                (err or b"").decode("utf-8", "replace").strip())
     except (OSError, subprocess.SubprocessError):
         return 1, "", "git invocation failed"
 
@@ -234,15 +283,25 @@ def check_upstream(dirpath, st):
     return result
 
 
+def git_truncated(text, cap):
+    """Did this output come back at the ceiling, i.e. cut short?"""
+    return len(text) >= cap
+
+
 def diff_text(dirpath, from_sha, to_ref):
     """The incoming change, as unified diff text, capped. This is the exact
     thing a human — or Claude — would need to read to judge an update."""
     code, out, _ = git(dirpath, "-c", "core.pager=cat", "diff", "--no-color",
-                       "%s..%s" % (from_sha, to_ref))
+                       "%s..%s" % (from_sha, to_ref), cap=MAX_DIFF_BYTES)
     if code != 0:
         return ""
-    if len(out) > MAX_DIFF_BYTES:
-        out = out[:MAX_DIFF_BYTES] + "\n\n[diff truncated at %d bytes]" % MAX_DIFF_BYTES
+    if git_truncated(out, MAX_DIFF_BYTES):
+        # Say so in the text itself: the reviewer must not mistake a cut-off
+        # diff for a complete one, and the panel shows what it was given.
+        out = (out[:MAX_DIFF_BYTES]
+               + "\n\n[This update is larger than %d bytes. Everything above is "
+                 "the first part of it; the rest was not read. Treat anything "
+                 "you cannot see as unreviewed.]" % MAX_DIFF_BYTES)
     return out
 
 
@@ -797,6 +856,19 @@ def openai_chat(base, model, system, user):
     return ""
 
 
+def arg_prompt(text):
+    """A prompt that has to travel as a command-line argument, trimmed to fit
+    the operating system's limit and told plainly that it was trimmed. Without
+    this the command fails outright on a large change and the review quietly
+    degrades to the machine scan."""
+    if len(text) <= MAX_PROMPT_ARG_BYTES:
+        return text
+    return (text[:MAX_PROMPT_ARG_BYTES]
+            + "\n\n[Cut off here: this change is too large to hand to this "
+              "reviewer in one piece. Everything beyond this point is "
+              "unreviewed — say so in WATCH FOR.]")
+
+
 def run_agent(diff, scan_facts, plugin_name, context="update"):
     """Hand the diff to the user's chosen AI reviewer, read-only, and get a
     plain-English verdict back. Structurally read-only: the agent runs with no
@@ -851,26 +923,29 @@ def run_agent(diff, scan_facts, plugin_name, context="update"):
             # LM Studio alike.
             raw = openai_chat(spec["base"], model, REVIEW_SYSTEM, prompt)
         else:
+            stdin_text = None
             if agent == "claude":
                 cmd = ["claude", "-p", "--allowedTools", "",
                        "--permission-mode", "plan",
                        "--append-system-prompt", REVIEW_SYSTEM]
                 if model:
                     cmd += ["--model", model]
-                cmd += [prompt]
+                # On standard input, so the size of the change cannot decide
+                # whether it gets reviewed.
+                stdin_text = prompt
             elif agent == "codex":
                 # Read-only sandbox, no network, one shot. The framing goes in
                 # the prompt since codex has no separate system-prompt flag.
                 cmd = ["codex", "exec", "--sandbox", "read-only"]
                 if model:
                     cmd += ["--model", model]
-                cmd += [REVIEW_SYSTEM + "\n\n" + prompt]
+                cmd += [arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
             elif agent == "gemini":
                 # Gemini CLI, one-shot prompt mode. Sandbox on where supported.
-                cmd = ["gemini", "-p", REVIEW_SYSTEM + "\n\n" + prompt]
+                cmd = ["gemini", "-p", arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
                 if model:
                     cmd = ["gemini", "-m", model, "-p",
-                           REVIEW_SYSTEM + "\n\n" + prompt]
+                           arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
             else:
                 return offline_summary(diff, scan_facts, plugin_name)
 
@@ -879,9 +954,20 @@ def run_agent(diff, scan_facts, plugin_name, context="update"):
                 # The ceiling goes at the read, not after it: the agent's
                 # output passes through `head -c`, which stops the pipe at the
                 # limit rather than letting an endless reply accumulate here.
+                stdin_file = None
+                if stdin_text is not None:
+                    fd, tmp_prompt = tempfile.mkstemp(prefix=".plug-prompt.",
+                                                      dir=empty)
+                    with os.fdopen(fd, "w") as f:
+                        f.write(stdin_text)
+                    stdin_file = open(tmp_prompt, "rb")
+                    os.unlink(tmp_prompt)
                 proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    cmd, stdin=(stdin_file or subprocess.DEVNULL),
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     cwd=empty, env={**os.environ, "HOME": HOME})
+                if stdin_file is not None:
+                    stdin_file.close()
                 try:
                     capper = subprocess.Popen(
                         ["head", "-c", str(MAX_AGENT_BYTES)],
@@ -891,6 +977,8 @@ def run_agent(diff, scan_facts, plugin_name, context="update"):
                         out, _ = capper.communicate(timeout=CLAUDE_TIMEOUT)
                     except subprocess.TimeoutExpired:
                         capper.kill()
+                        # Bounded: head already stopped the pipe at the
+                        # ceiling, so this only drains what it let through.
                         out, _ = capper.communicate()
                         raise
                 finally:
@@ -1023,6 +1111,72 @@ def source_listing(root_dir, limit=MAX_DIFF_BYTES):
     return "".join(parts)
 
 
+def dir_bytes(path, ceiling):
+    """Size of a directory tree, stopping as soon as it passes the ceiling —
+    there is no reason to finish counting something already too big."""
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+            if total > ceiling:
+                return total
+    return total
+
+
+def clone_bounded(workdir, url, dest, ceiling=MAX_CLONE_BYTES):
+    """Clone a stranger's repository with a ceiling on what it may put on the
+    disk, enforced while it arrives. Returns (code, error)."""
+    cmd = ["git", "-C", workdir,
+           "-c", "core.hooksPath=/dev/null",
+           "-c", "protocol.ext.allow=never",
+           "-c", "protocol.file.allow=user",
+           "clone", "--depth", "1", "--no-tags", "--single-branch",
+           "--", url, dest]
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0",
+           "GIT_CONFIG_NOSYSTEM": "1", "HOME": HOME}
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, env=env)
+    except OSError:
+        return 1, "git invocation failed"
+    deadline = time.time() + CLONE_TIMEOUT
+    while proc.poll() is None:
+        if dir_bytes(dest, ceiling) > ceiling:
+            proc.kill()
+            proc.wait(timeout=5)
+            return 1, ("repository is larger than %d MB — refusing to read it"
+                       % (ceiling // (1024 * 1024)))
+        if time.time() > deadline:
+            proc.kill()
+            proc.wait(timeout=5)
+            return 1, "repository took too long to fetch"
+        time.sleep(0.25)
+    err = (proc.stderr.read(64 * 1024) or b"").decode("utf-8", "replace")
+    proc.stderr.close()
+    if proc.returncode == 0 and dir_bytes(dest, ceiling) > ceiling:
+        return 1, ("repository is larger than %d MB — refusing to read it"
+                   % (ceiling // (1024 * 1024)))
+    return proc.returncode, err
+
+
+def remote_head(url, ref="HEAD"):
+    """What the repository is at right now, asked without downloading it.
+    Returns the commit id, or "" if the question could not be answered."""
+    if not REPO_URL_RE.match(str(url or "")):
+        return ""
+    code, out, _ = git(HOME, "ls-remote", "--", url, ref, cap=64 * 1024)
+    if code != 0:
+        return ""
+    for line in out.split("\n"):
+        parts = line.split()
+        if len(parts) == 2 and re.fullmatch(r"[0-9a-f]{40}", parts[0]):
+            return parts[0]
+    return ""
+
+
 def inspect_repo(url):
     """Read a plugin BEFORE it is installed: clone it to a throwaway
     directory, scan what it can do, and get a plain-English verdict on the
@@ -1036,9 +1190,10 @@ def inspect_repo(url):
         dest = os.path.join(tmp, "src")
         # A shallow clone with no tags: enough to read, as little as possible
         # fetched. Hooks and alternate protocols are already disabled in git().
-        code, _, err = git(tmp, "clone", "--depth", "1", "--no-tags",
-                           "--single-branch", "--", url, dest,
-                           timeout=CLONE_TIMEOUT)
+        # The size is watched while it arrives — a repository that keeps
+        # growing is stopped mid-clone, not measured once it has filled the
+        # disk.
+        code, err = clone_bounded(tmp, url, dest)
         if code != 0:
             return {"error": (err or "could not clone the repository").strip().split("\n")[-1]}
         manifest = read_json(os.path.join(dest, "manifest.json"), 256 * 1024, {})
@@ -1077,8 +1232,10 @@ def safe_id(pid):
 # --------------------------------------------------- apply / rollback
 
 def apply_update(pid):
-    """Move a plugin to the reviewed upstream commit and record that we have
-    reviewed it. The panel only calls this after the user approves."""
+    """Move a plugin to the commit that was reviewed — that exact commit, not
+    wherever its branch has reached since. The review recorded which commit it
+    was reading; anything else here is a different piece of code than the one
+    the user approved, so it is refused rather than applied."""
     inv = installed_ids()
     if pid not in inv:
         return {"error": "not installed"}
@@ -1086,11 +1243,31 @@ def apply_update(pid):
     gs = git_state(dirpath)
     if not gs["isGit"] or not gs["upstreamRef"]:
         return {"error": "not a git checkout"}
+    rec = read_json(os.path.join(STATE_DIR, "review-%s.json" % safe_id(pid)),
+                    4 * 1024 * 1024, {})
+    if not isinstance(rec, dict) or rec.get("id") != pid:
+        return {"error": "no review on record for this plugin — review it again"}
+    to_sha = str(rec.get("toSha") or "")
+    from_sha = str(rec.get("fromSha") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", to_sha):
+        return {"error": "the review did not record which commit it read — review it again"}
     before = gs["sha"]
-    code, _, err = git(dirpath, "merge", "--ff-only", gs["upstreamRef"])
+    if from_sha and from_sha != before:
+        return {"error": "this plugin has moved since it was reviewed — review it again"}
+    # The reviewed commit has to be a real commit in this checkout, and it has
+    # to be ahead of where we are. Both are checked before anything moves.
+    code, kind, _ = git(dirpath, "cat-file", "-t", to_sha)
+    if code != 0 or kind != "commit":
+        return {"error": "the reviewed version is no longer in the repository — review it again"}
+    code, _, _ = git(dirpath, "merge-base", "--is-ancestor", before, to_sha)
+    if code != 0:
+        return {"error": "the reviewed version does not follow on from this one — review it again"}
+    code, _, err = git(dirpath, "merge", "--ff-only", to_sha)
     if code != 0:
         return {"error": "could not fast-forward: %s" % err}
     _, newsha, _ = git(dirpath, "rev-parse", "HEAD")
+    if newsha != to_sha:
+        return {"error": "ended up on a different commit than the one reviewed"}
     hist = load_history()
     entry = hist.get(pid, {})
     entry["reviewedSha"] = newsha
@@ -1139,6 +1316,11 @@ def main():
         p.add_argument("id")
     p = sub.add_parser("inspect")
     p.add_argument("url")
+    # Asked before an install: is the repository still at the commit that was
+    # reviewed? Answered without downloading anything.
+    p = sub.add_parser("still-at")
+    p.add_argument("url")
+    p.add_argument("sha")
     args = ap.parse_args()
 
     ensure_state_dir()
@@ -1170,6 +1352,11 @@ def main():
         print(json.dumps(review(args.id)))
     elif args.cmd == "inspect":
         print(json.dumps(inspect_repo(args.url)))
+    elif args.cmd == "still-at":
+        head = remote_head(args.url)
+        print(json.dumps({"url": args.url, "reviewed": args.sha, "now": head,
+                          "same": bool(head) and head == args.sha,
+                          "reachable": bool(head)}))
     elif args.cmd == "apply":
         print(json.dumps(apply_update(args.id)))
     elif args.cmd == "rollback":

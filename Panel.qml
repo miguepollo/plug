@@ -115,6 +115,28 @@ Item {
   // it afterwards.
   property string reviewMode: "update"      // update | install
   property var installCandidate: null
+  // Set when an install stopped because the plugin's code changed between the
+  // review and the click. Nothing was installed; this drives the choice.
+  property string movedName: ""
+  property string movedSha: ""
+  property var lastApproved: null
+
+  // Read the newer code instead — the same review, on what is there now.
+  function reviewMoved() {
+    var a = root.lastApproved
+    root.movedName = ""; root.movedSha = ""
+    if (a && a.candidate) root.installFromStore(a.candidate)
+  }
+  // Take the version that was actually reviewed and approved. It is pinned to
+  // that commit and switched on only once it is confirmed to be that commit,
+  // so the newer code never runs.
+  function installApproved() {
+    var a = root.lastApproved
+    root.movedName = ""; root.movedSha = ""
+    if (!a || !a.repo) return
+    root.runJob(["install", a.repo + ".git", a.name, a.sha, a.id,
+                 "--approved-version"], "Installing the version you approved…")
+  }
 
   // Settings, loaded from the engine's settings.json.
   property var settings: ({ reviewAgent: "claude", reviewModel: "sonnet", autoCheck: true })
@@ -146,12 +168,25 @@ Item {
     root.noticeText = ""
     root.pendingHighlight = ""
     root.busy = false; root.busyNote = ""
+    if (!payloadJson || String(payloadJson) === "{}") {
+      root.movedName = ""; root.movedSha = ""
+    }
     jobWatchdog.stop()
     var payload = null
     try { payload = JSON.parse(String(payloadJson || "")) } catch (e) { payload = null }
     if (payload && typeof payload === "object") {
       if (payload.highlight) root.pendingHighlight = String(payload.highlight)
-      if (payload.error) root.noticeText = String(payload.error).trim().split("\n").pop()
+      if (payload.error && String(payload.error).indexOf("MOVED ") === 0) {
+        // Nothing was installed. The author pushed since the review, so the
+        // choice is the user's: read the new version, or take the one they
+        // already approved.
+        var bits = String(payload.error).split(" ")
+        root.movedName = bits.length > 1 ? bits[1] : "That plugin"
+        root.movedSha = bits.length > 2 ? bits[2] : ""
+        root.noticeText = ""
+      } else if (payload.error) {
+        root.noticeText = String(payload.error).trim().split("\n").pop()
+      }
       else if (payload.notice) root.noticeText = String(payload.notice)
     }
     root.refreshAll()
@@ -394,13 +429,26 @@ Item {
     onExited: root.reviewRunning = false
   }
 
-  function approveUpdate() {
+  // The install carries the commit that was actually read, not just the
+  // address it was read from — an address points at whatever is there when
+  // something looks, a commit is the code the reviewer judged.
+  function approveUpdate(approvedVersion) {
     if (!root.reviewId) return
     if (root.reviewMode === "install") {
       var c = root.installCandidate
+      var d = root.reviewData
+      var sha = d && d.sha ? String(d.sha) : ""
+      var pid = d && d.id ? String(d.id) : (c && c.id ? String(c.id) : "")
+      var nm = c && c.name ? c.name : (d && d.name ? d.name : "plugin")
+      var repo = c && c.repo ? c.repo : (d && d.url ? d.url : "")
       root.cancelReview()
-      if (c && c.repo) root.runJob(["install", c.repo + ".git", c.name],
-                                   "Installing " + c.name + "…")
+      if (repo) {
+        root.lastApproved = { repo: repo, name: nm, sha: sha, id: pid,
+                              candidate: c }
+        var args = ["install", repo + ".git", nm, sha, pid]
+        if (approvedVersion === true) args.push("--approved-version")
+        root.runJob(args, "Installing " + nm + "…")
+      }
       return
     }
     var id = root.reviewId
@@ -926,6 +974,45 @@ Item {
           ReviewView {
             visible: root.reviewId !== ""
             anchors.fill: parent
+          }
+
+          // The author pushed while the review was on screen, so nothing was
+          // installed. Both ways forward are offered plainly, because either
+          // is reasonable and only the user can choose.
+          Rectangle {
+            visible: root.movedName !== "" && root.reviewId === ""
+            anchors.fill: parent
+            color: root.background
+            Column {
+              anchors.centerIn: parent
+              width: parent.width - Style.space(60)
+              spacing: Style.space(12)
+              Text {
+                width: parent.width
+                text: root.movedName + " changed while you were reading it"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                width: parent.width
+                text: "Its author published new code after the check finished, so nothing has been installed. The version that was checked is still available."
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              Row {
+                spacing: Style.space(8)
+                PlugButton { label: "Check the new version"; onPicked: root.reviewMoved() }
+                PlugButton { label: "Install the version you checked"; onPicked: root.installApproved() }
+                PlugButton { label: "Cancel"; onPicked: { root.movedName = ""; root.movedSha = "" } }
+              }
+            }
           }
 
           // ===== STORE =====
