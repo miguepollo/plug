@@ -15,8 +15,10 @@ in plain English, whether it is safe to apply.
 
 - **Installed** — every community plugin you have, each with an on/off switch
   and a remove, a trust dot from a quick capability scan, and a clear **UPDATE**
-  flag when its repository has moved past what you installed. Omarchy's own
-  built-in plugins are never listed here; the shell manages those itself.
+  flag when its repository has moved past what you installed. Laid out two-up to
+  save space, with community plugins and, in a folded **Official** section,
+  Omarchy's own optional bar widgets — toggle only, never removable (a built-in
+  is part of Omarchy, not an installed copy, so there is nothing to remove).
 - **Review an update** — Plug fetches the exact changes, runs a fast offline
   scan, and hands the diff to your chosen AI reviewer (read-only). You get a
   **safe / be careful / do not** verdict, a plain-English summary of what
