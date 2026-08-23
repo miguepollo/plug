@@ -223,7 +223,7 @@ Item {
           // Explicit falses: a QML `visible:` binding that evaluates to
           // undefined falls back to its default (true), which would wrongly
           // light up these badges on built-in plugins.
-          updateAvailable: false, canRevert: false,
+          updateAvailable: false, canRevert: false, iconHidden: false,
           trustScore: -1, capabilities: [], commitsBehind: 0
         })
         continue
@@ -235,8 +235,12 @@ Item {
         author: a.author || "",
         kinds: (p.kinds || []).join(", "),
         official: false,
-        enabled: p.enabled === true,
+        enabled: p.enabled === true || a.iconHidden === true,
         canDisable: p.canDisable !== false,
+        // The shell calls a bar widget enabled only when it has a place in
+        // the bar, so a plugin whose icon its owner switched off reports as
+        // disabled while running perfectly well. It is on; its icon is not.
+        iconHidden: a.iconHidden === true,
         updateAvailable: a.updateAvailable === true,
         commitsBehind: a.commitsBehind || 0,
         trustScore: (a.trustScore === undefined ? -1 : a.trustScore),
@@ -1358,6 +1362,7 @@ Item {
           text: !rowData ? "" : confirming ? "remove this plugin?"
               : rowData.official ? (rowData.kinds || "built-in")
               : rowData.updateAvailable ? (rowData.commitsBehind + " new change" + (rowData.commitsBehind === 1 ? "" : "s") + " · press update to review")
+              : rowData.iconHidden ? "on · bar icon hidden"
               : (rowData.id + (rowData.kinds ? " · " + rowData.kinds : ""))
           textFormat: Text.PlainText
           color: confirming ? root.dangerColor : root.dim

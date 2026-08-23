@@ -606,6 +606,38 @@ def installed_ids():
     return out
 
 
+def shell_placements():
+    """Where each plugin sits in the shell config: on the bar, or in the list
+    of plugins loaded without a bar icon.
+
+    The shell calls a bar widget "enabled" only when it has a place in the bar,
+    so a plugin whose icon its owner has switched off reports as disabled while
+    still running perfectly well. Reading the config directly is the only way
+    to tell "switched off" from "loaded, icon hidden"."""
+    out = {}
+    d = read_json(os.path.join(HOME, ".config", "omarchy", "shell.json"),
+                  4 * 1024 * 1024, {})
+    if not isinstance(d, dict):
+        return out
+
+    def eid(w):
+        return w.get("id") if isinstance(w, dict) else w
+
+    bar = d.get("bar") if isinstance(d.get("bar"), dict) else {}
+    lay = bar.get("layout")
+    sections = lay.values() if isinstance(lay, dict) else (lay or [])
+    for sec in sections:
+        for w in (sec or []):
+            i = eid(w)
+            if isinstance(i, str) and i:
+                out.setdefault(i, {})["inBar"] = True
+    for w in (d.get("plugins") or []):
+        i = eid(w)
+        if isinstance(i, str) and i:
+            out.setdefault(i, {})["inPluginList"] = True
+    return out
+
+
 def snapshot(check_updates=False):
     """Build the auxiliary state the panel joins onto the live plugin list:
     git state, trust read, and the update flag. Offline unless asked to
@@ -613,6 +645,7 @@ def snapshot(check_updates=False):
     prev = read_json(STATE_FILE, MAX_STATE_BYTES, {})
     prev_plugins = prev.get("plugins", {}) if isinstance(prev, dict) else {}
     hist = load_history()
+    placement = shell_placements()
     plugins = {}
     for pid, info in installed_ids().items():
         dirpath = info["dir"]
@@ -635,6 +668,10 @@ def snapshot(check_updates=False):
             "capabilities": sc["capabilities"],
             "reviewedSha": hist.get(pid, {}).get("reviewedSha", ""),
             "previousSha": hist.get(pid, {}).get("previousSha", ""),
+            # Loaded, but with its bar icon switched off by its owner.
+            "iconHidden": (placement.get(pid, {}).get("inPluginList", False)
+                           and not placement.get(pid, {}).get("inBar", False)
+                           and "bar-widget" in (m.get("kinds") or [])),
         }
         # Carry the last known update result unless we are refreshing it now.
         old = prev_plugins.get(pid, {})

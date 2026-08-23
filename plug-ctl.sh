@@ -69,15 +69,13 @@ for w in (c.get("plugins") or []):
 sys.exit(0 if want in seen else 1)' "$1"
 }
 
-# Is the shell reporting this plugin as on? For a bar widget that means it has
-# a place in the bar; an entry in the plugins list does not count. That
-# distinction matters: a bar widget left with only a plugins-list entry reads
-# as off AND cannot be switched on, because turning it on finds that entry,
-# decides there is nothing to add, and leaves it exactly where it was. Even
-# `omarchy plugin enable` reports success and changes nothing. Clearing the
-# stale entry first is what breaks the deadlock.
+# Is this plugin on? The shell calls a bar widget enabled only when it has a
+# place in the bar, so a plugin whose owner switched its bar icon off reports
+# as disabled while running perfectly well — its entry sits in the plugins
+# list instead. Either location counts as on here: hiding an icon is not
+# switching a plugin off, and nothing should drag a hidden icon back.
 is_on() {
-  omarchy-shell shell listPlugins 2>/dev/null | python3 -c '
+  if omarchy-shell shell listPlugins 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -86,7 +84,10 @@ except Exception:
 for p in d if isinstance(d, list) else []:
     if p.get("id") == sys.argv[1]:
         sys.exit(0 if p.get("enabled") is True else 1)
-sys.exit(1)' "$1"
+sys.exit(1)' "$1"; then
+    return 0
+  fi
+  refs_left "$1"
 }
 
 # Clear every reference, checking the config rather than trusting the reply.
@@ -335,8 +336,10 @@ if isinstance(d, dict) and d.get("error"):
     if [[ $1 == enable ]]; then
       out=$(omarchy-shell shell setPluginEnabled "$id" true 2>&1) || true
       [[ $out == "ok" ]] || err="${out:-setPluginEnabled produced no output}"
-      # Judge it by the state, not the answer. If it is still off, it is the
-      # stale-entry deadlock: clear what is there and turn it on again.
+      # Judge it by the state, not the answer. Still off with no entry
+      # anywhere means the switch did nothing: clear whatever is there and try
+      # once more. A plugin that is merely hidden is already on and is left
+      # exactly as its owner set it.
       if [[ -z $err ]] && ! is_on "$id"; then
         clear_refs "$id" >/dev/null 2>&1 || true
         out=$(omarchy-shell shell setPluginEnabled "$id" true 2>&1) || true
