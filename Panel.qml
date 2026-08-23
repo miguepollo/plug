@@ -306,16 +306,31 @@ Item {
 
   // ------------------------------------------------------------------ remove
   function askRemove(id) { root.confirmRemoveId = id }
+  // --yes is required: omarchy-plugin-remove asks for confirmation, and with no
+  // terminal behind us it refuses outright rather than prompting. We already
+  // asked ("sure?"), so answer for the user. Nothing is announced until the
+  // command has actually exited, and a failure says so with its own message.
+  property string removingId: ""
   function removeConfirmed(id) {
     root.confirmRemoveId = ""
     root.busy = true; root.busyNote = "Removing…"
-    removeProc.command = ["omarchy", "plugin", "remove", id]
+    root.removingId = id
+    removeProc.command = ["omarchy", "plugin", "remove", id, "--yes"]
     removeProc.running = false; removeProc.running = true
-    root.noticeText = "Removed " + id
   }
   Process {
     id: removeProc
-    onExited: { root.busy = false; root.busyNote = ""; root.refreshAll() }
+    onExited: (code) => {
+      root.busy = false; root.busyNote = ""
+      if (code === 0) {
+        root.noticeText = "Removed " + root.removingId
+      } else {
+        var err = (removeProc.stderr.text || "").trim().split("\n").pop()
+        root.noticeText = "Could not remove " + root.removingId + (err ? " — " + err : "")
+      }
+      root.removingId = ""
+      root.refreshAll()
+    }
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector { waitForEnd: true }
   }
@@ -443,11 +458,23 @@ Item {
     root.busy = true; root.busyNote = "Installing " + c.name + "…"
     installProc.command = ["omarchy", "plugin", "add", c.repo + ".git", "--enable", "--yes"]
     installProc.running = false; installProc.running = true
+    root.installingName = c.name
     root.noticeText = "Installing " + c.name
   }
+  property string installingName: ""
   Process {
     id: installProc
-    onExited: { root.busy = false; root.busyNote = ""; root.refreshAll() }
+    onExited: (code) => {
+      root.busy = false; root.busyNote = ""
+      if (code === 0) {
+        root.noticeText = "Installed " + root.installingName
+      } else {
+        var err = (installProc.stderr.text || "").trim().split("\n").pop()
+        root.noticeText = "Could not install " + root.installingName + (err ? " — " + err : "")
+      }
+      root.installingName = ""
+      root.refreshAll()
+    }
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector { waitForEnd: true }
   }
