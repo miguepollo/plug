@@ -1,37 +1,44 @@
 # Plug
 
-**One place to manage your community Omarchy plugins — and never apply an
-update blind.**
+**One place to manage your community Omarchy plugins — and never install or
+update one blind.**
 
 ![Plug](preview.png)
 
-Plugins run as you, with no sandbox, so an update is just new code you have not
-seen. Plug manages your installed community plugins — toggle, remove, browse and
-install more — and puts a gate in front of every update: it flags when one is
-waiting, and an AI reviewer of your choice reads the exact changes and tells you,
-in plain English, whether it is safe to apply.
+Plugins run as you, with no sandbox. A plugin you install is code you have not
+read, and an update is more of it. Plug manages your installed community plugins
+— toggle, remove, browse and install more — and puts the same gate in front of
+both moments: before a plugin is installed, and before an update is applied, an
+AI reviewer of your choice reads the actual code and tells you, in plain
+English, whether it is safe.
 
 ## What it does
 
 - **Installed** — every community plugin you have, each row with the same four
   controls in the same place: **update**, **restore**, **remove** and an
-  **on/off** switch, plus a trust dot from a quick capability scan — which
-  reads only the code that runs, ignoring comments and the text a plugin
-  displays, and counts a command a plugin merely quotes for you to copy far
-  more lightly than one it runs itself. The update
-  control lights **green** the moment the plugin's repository has moved past
-  what you installed; restore lights up once Plug has applied an update it can
-  undo. Laid out two-up to save space, with a folded **Official** section for
-  Omarchy's own optional bar widgets — those show just the on/off switch,
-  lined up with the community rows (a built-in is part of Omarchy, not an
-  installed copy, so there is nothing to update or remove).
+  **on/off** switch. The update control lights **green** the moment the
+  plugin's repository has moved past what you installed; restore lights up once
+  Plug has applied an update it can undo. Laid out two-up to save space, with a
+  folded **Official** section for Omarchy's own optional bar widgets — those
+  show just the on/off switch, lined up with the community rows (a built-in is
+  part of Omarchy, not an installed copy, so there is nothing to update or
+  remove).
+- **The trust dot** on each row is a quick capability read of the plugin's
+  source: what it can reach, run and write. It scores only code that actually
+  runs — comments are dropped, so is text the plugin merely displays, and a
+  command quoted for you to copy yourself counts far more lightly than one the
+  plugin runs. A long line is only treated as packed or encoded content when
+  nothing breaks it up, so honest data — a coastline, a lookup table — is not
+  mistaken for something hidden.
 - **Review an update** — Plug fetches the exact changes, runs a fast offline
   scan, and hands the diff to your chosen AI reviewer (read-only). You get a
   **safe / be careful / do not** verdict, a plain-English summary of what
   changed, anything to watch for, and the author's own commit notes — then you
   decide. It also judges the update the way the marketplace's own approval
   checks do (new privileges, downloads, network hosts, background processes, or
-  writes outside the plugin).
+  writes outside the plugin). The reviewer is told which question it is
+  answering: judging code that has never been on your machine is not the same
+  as judging a change to code you already trust.
 - **Restore** — undo the last update you applied, returning the plugin to the
   version it was on before. Plug then flags the update as available again, so
   nothing is lost — you can re-apply it whenever you are ready.
@@ -65,10 +72,11 @@ login: it relies on that tool's own sign-in. If you use Claude Code, it uses the
 Claude account you already set up in the terminal; Plug never sees a password or
 key. If the tool is not signed in, the review falls back to the offline scan.
 
-**Privacy.** When you review an update with a cloud agent (Claude, Codex,
-Gemini), the plugin's code changes — the diff — are sent to that provider, and
-only then. Choosing a local server (Ollama, LM Studio) or the offline scan keeps
-everything on your machine.
+**Privacy.** A cloud agent (Claude, Codex, Gemini) is sent the code it is asked
+to judge, and only then: the diff when you review an update, and the plugin's
+full source when you check one before installing it. Both are public code from a
+public repository, but it does leave your machine. Choosing a local server
+(Ollama, LM Studio) or the offline scan keeps everything on it.
 
 ## Install
 
@@ -154,9 +162,9 @@ Everything runs as your own user.
 
 ## Handling untrusted input
 
-A plugin's repository, the marketplace catalog and the update diff all come from
-outside, and Plug runs inside a shell process that stays up for days, so all of
-it is treated as data:
+A plugin's repository, the marketplace catalog, the update diff and the source
+of a plugin you are considering all come from outside, and Plug runs inside a
+shell process that stays up for days, so all of it is treated as data:
 
 - Every file Plug reads is read to a size ceiling, following a symlink only to a
   real regular file, so an oversized or redirected file cannot be pulled whole
@@ -168,10 +176,17 @@ it is treated as data:
   helper script, and refused rather than escaped, because it becomes Lua source
   in `bindings.lua`.
 - The AI reviewer is run **structurally read-only** — no tools, in an empty
-  working directory — so a prompt-injection hidden in an update's diff has
-  nothing to act on. The diff is data it reads, never instructions it follows.
+  working directory — so a prompt-injection hidden in an update's diff, or in
+  the source of a plugin being checked, has nothing to act on. It is data the
+  reviewer reads, never instructions it follows.
 - `git` runs against each untrusted checkout with the repository's own hooks and
   config disabled, so inspecting a plugin can never run code from it.
+- A repository address is checked against a plain `https` shape before git is
+  ever pointed at it, and passed as an argument rather than through a shell, so
+  a catalog entry cannot name a local path or another protocol.
+- A plugin you ask Plug to check before installing is cloned shallow into a
+  throwaway directory, read, and deleted — whether the check succeeds or not.
+  Nothing in it is executed at any point.
 
 ## Dependencies
 
