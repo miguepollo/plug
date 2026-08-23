@@ -13,12 +13,15 @@ in plain English, whether it is safe to apply.
 
 ## What it does
 
-- **Installed** — every community plugin you have, each with an on/off switch
-  and a remove, a trust dot from a quick capability scan, and a clear **UPDATE**
-  flag when its repository has moved past what you installed. Laid out two-up to
-  save space, with community plugins and, in a folded **Official** section,
-  Omarchy's own optional bar widgets — toggle only, never removable (a built-in
-  is part of Omarchy, not an installed copy, so there is nothing to remove).
+- **Installed** — every community plugin you have, each row with the same four
+  controls in the same place: **update**, **restore**, **remove** and an
+  **on/off** switch, plus a trust dot from a quick capability scan. The update
+  control lights **green** the moment the plugin's repository has moved past
+  what you installed; restore lights up once Plug has applied an update it can
+  undo. Laid out two-up to save space, with a folded **Official** section for
+  Omarchy's own optional bar widgets — those show just the on/off switch,
+  lined up with the community rows (a built-in is part of Omarchy, not an
+  installed copy, so there is nothing to update or remove).
 - **Review an update** — Plug fetches the exact changes, runs a fast offline
   scan, and hands the diff to your chosen AI reviewer (read-only). You get a
   **safe / be careful / do not** verdict, a plain-English summary of what
@@ -26,8 +29,9 @@ in plain English, whether it is safe to apply.
   decide. It also judges the update the way the marketplace's own approval
   checks do (new privileges, downloads, network hosts, background processes, or
   writes outside the plugin).
-- **Lock** a plugin to pin it at the version you trust — it will not update
-  until you unlock it — and **revert** to undo the last update you applied.
+- **Restore** — undo the last update you applied, returning the plugin to the
+  version it was on before. Plug then flags the update as available again, so
+  nothing is lost — you can re-apply it whenever you are ready.
 - **Store** — search the community marketplace and install with one click.
   Omarchy's built-in plugins appear here too, marked **OFFICIAL** and shown for
   discovery only.
@@ -95,7 +99,8 @@ Its state is left in `~/.local/state/plug/`, which you can delete.
 
 **Its own state**, all inside `~/.local/state/plug/`: `state.json` (git and
 scan results per plugin), `catalog.json` (the marketplace catalog, cached),
-`settings.json` (your choices), `locks.json` (lock and revert bookkeeping).
+`settings.json` (your choices), `locks.json` (restore bookkeeping — which
+version each applied update came from).
 
 **Outside its own directory** — only in response to something you do:
 

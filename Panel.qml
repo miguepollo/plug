@@ -10,14 +10,16 @@ import "."
 //
 //   omarchy-shell shell toggle io.github.weedwhitesandwine.plug
 //
-// Three views. INSTALLED lists the third-party plugins you have, each with an
-// on/off switch and a remove, and — the point of Plug — an UPDATE flag when
-// the plugin's repository has moved past what you installed. Acting on that
-// flag opens a REVIEW: the exact changes are read by the AI reviewer you chose
-// in settings, structurally read-only, and reported back in plain English with
-// a safe / be-careful / do-not traffic light. STORE searches the marketplace
-// catalog and installs. First-party Omarchy plugins are never shown or touched
-// — the shell manages those itself.
+// Three views. INSTALLED lists the third-party plugins you have, every row
+// with the same four controls — update, restore, remove, on/off — and the
+// update control lights green when the plugin's repository has moved past
+// what you installed. Pressing it opens a REVIEW: the exact changes are read
+// by the AI reviewer you chose in settings, structurally read-only, and
+// reported back in plain English with a safe / be-careful / do-not traffic
+// light. Restore undoes the last update Plug applied. STORE searches the
+// marketplace catalog and installs. Omarchy's own plugins sit in a folded
+// Official section with just the on/off switch — they are built into the
+// shell, so there is nothing to update, restore or remove.
 //
 // The heavy lifting lives in plugd.py; this panel runs it and reads the small
 // JSON files it writes, always through `head` so an oversized file is never
@@ -188,7 +190,12 @@ Item {
         official.push({
           id: p.id, name: p.name || p.id, official: true,
           kinds: (p.kinds || []).join(", "),
-          enabled: p.enabled === true, canDisable: true
+          enabled: p.enabled === true, canDisable: true,
+          // Explicit falses: a QML `visible:` binding that evaluates to
+          // undefined falls back to its default (true), which would wrongly
+          // light up these badges on built-in plugins.
+          updateAvailable: false, canRevert: false,
+          trustScore: -1, capabilities: [], commitsBehind: 0
         })
         continue
       }
@@ -205,7 +212,6 @@ Item {
         commitsBehind: a.commitsBehind || 0,
         trustScore: (a.trustScore === undefined ? -1 : a.trustScore),
         capabilities: a.capabilities || [],
-        locked: a.locked === true,
         isGit: a.isGit === true,
         remote: a.remote || "",
         canRevert: (a.previousSha || "") !== ""
@@ -358,13 +364,6 @@ Item {
   }
 
   function cancelReview() { root.reviewId = ""; root.reviewData = null; root.reviewRunning = false }
-
-  function toggleLock(id, locked) {
-    lockProc.command = ["python3", root.pluginDir + "/plugd.py",
-                        locked ? "lock" : "unlock", id]
-    lockProc.running = false; lockProc.running = true
-  }
-  Process { id: lockProc; onExited: root.refreshAll(); stdout: StdioCollector { waitForEnd: true } }
 
   // Undo the last applied update — the version to return to was recorded when
   // the update was applied.
@@ -644,7 +643,7 @@ Item {
           if (root.selectedIndex >= 0 && root.selectedIndex < n) {
             var row = root.installedRows[root.selectedIndex]
             if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
-              if (row.updateAvailable && !row.locked) root.startReview(row.id)
+              if (row.updateAvailable) root.startReview(row.id)
               else root.setEnabled(row.id, !row.enabled)
               e.accepted = true; return
             }
@@ -695,13 +694,13 @@ Item {
               width: badgeText.implicitWidth + Style.space(14)
               height: Style.space(20)
               radius: height / 2
-              color: root.warnColor
+              color: root.okColor
               Text {
                 id: badgeText
                 anchors.centerIn: parent
                 text: root.updateCount + (root.updateCount === 1 ? " update" : " updates")
                 textFormat: Text.PlainText
-                color: "#1a1005"
+                color: "#0a1a0e"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -751,7 +750,7 @@ Item {
                     ? (root.updateCount + " update" + (root.updateCount === 1 ? "" : "s") + " available")
                     : "✓ No updates available"
                 textFormat: Text.PlainText
-                color: root.updateCount > 0 ? root.warnColor : root.okColor
+                color: root.okColor
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -1044,10 +1043,13 @@ Item {
     MouseArea { id: hov; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: parent.picked() }
   }
 
-  // Compact row, sized for two-up. The wide action buttons are gone: the
-  // amber UPDATE badge is itself the review trigger, the LOCKED badge unlocks,
-  // and enable/remove sit in a small control cluster on the right — so two
-  // rows fit across the card instead of one tall row wasting the width.
+  // Compact row, sized for two-up. Every community row carries the same four
+  // controls in the same order — update · restore · remove · on/off — so the
+  // eye finds each action in the same place on every row. A control that has
+  // nothing to do right now stays put but dims; update lights green the
+  // moment new changes are waiting. Official rows show only the on/off
+  // switch, anchored at the same right edge so the switches line up down the
+  // whole list.
   component InstalledRow: Rectangle {
     property var rowData: null
     property bool confirming: false
@@ -1059,13 +1061,14 @@ Item {
         ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
         : "transparent"
     border.color: selected ? root.accent
-      : rowData && rowData.updateAvailable ? Qt.rgba(root.warnColor.r, root.warnColor.g, root.warnColor.b, 0.5)
+      : rowData && rowData.updateAvailable ? Qt.rgba(root.okColor.r, root.okColor.g, root.okColor.b, 0.5)
       : root.hairline
     border.width: selected ? Math.max(1, Style.space(1)) : 1
-    opacity: rowData && rowData.locked ? 0.85 : 1
     MouseArea { id: rowHover; anchors.fill: parent; hoverEnabled: true }
 
-    // controls on the right; text fills the space that is left.
+    // controls on the right; text fills the space that is left. The on/off
+    // switch is last so it sits at the same position on every row — official
+    // rows hide the other three and stay aligned for free.
     Row {
       id: controls
       anchors.right: parent.right
@@ -1073,7 +1076,51 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(5)
 
-      // on/off toggle (compact)
+      // update — THE indicator: green and pressable when changes are waiting,
+      // dim when the plugin is current. Pressing it opens the review.
+      Rectangle {
+        visible: !(rowData && rowData.official)
+        readonly property bool armed: rowData && rowData.updateAvailable === true
+        anchors.verticalCenter: parent.verticalCenter
+        width: upLbl.implicitWidth + Style.space(14); height: Style.space(22)
+        radius: height / 2
+        color: armed ? root.okColor
+          : (upHover.containsMouse ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06) : "transparent")
+        border.color: armed ? root.okColor : root.hairline; border.width: 1
+        Text { id: upLbl; anchors.centerIn: parent; text: "update"; textFormat: Text.PlainText; color: parent.armed ? "#0a1a0e" : root.fainter; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: parent.armed }
+        MouseArea { id: upHover; anchors.fill: parent; hoverEnabled: true; cursorShape: parent.armed ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: if (parent.armed) root.startReview(rowData.id) }
+      }
+      // restore — undo the last applied update; lit only once there is a
+      // previous version recorded to go back to.
+      Rectangle {
+        visible: !(rowData && rowData.official)
+        readonly property bool armed: rowData && rowData.canRevert === true
+        anchors.verticalCenter: parent.verticalCenter
+        width: rsLbl.implicitWidth + Style.space(14); height: Style.space(22)
+        radius: height / 2
+        color: armed && rsHover.containsMouse ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10) : "transparent"
+        border.color: root.hairline; border.width: 1
+        Text { id: rsLbl; anchors.centerIn: parent; text: "restore"; textFormat: Text.PlainText; color: parent.armed ? root.foreground : root.fainter; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+        MouseArea { id: rsHover; anchors.fill: parent; hoverEnabled: true; cursorShape: parent.armed ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: if (parent.armed) root.revert(rowData.id) }
+      }
+      // remove — arms to a red confirm on the first press.
+      Rectangle {
+        visible: !(rowData && rowData.official)
+        anchors.verticalCenter: parent.verticalCenter
+        width: rmLbl.implicitWidth + Style.space(14); height: Style.space(22)
+        radius: height / 2
+        color: confirming ? root.dangerColor : (rmHover.containsMouse ? Qt.rgba(root.dangerColor.r, root.dangerColor.g, root.dangerColor.b, 0.15) : "transparent")
+        border.color: root.dangerColor; border.width: 1
+        Text { id: rmLbl; anchors.centerIn: parent; text: confirming ? "sure?" : "remove"; textFormat: Text.PlainText; color: confirming ? "#1a1005" : root.dangerColor; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: confirming }
+        MouseArea {
+          id: rmHover; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+          onClicked: {
+            if (root.confirmRemoveId === rowData.id) root.removeConfirmed(rowData.id)
+            else root.askRemove(rowData.id)
+          }
+        }
+      }
+      // on/off toggle — always last, so it lines up on every row.
       Rectangle {
         anchors.verticalCenter: parent.verticalCenter
         width: Style.space(56); height: Style.space(22)
@@ -1093,33 +1140,6 @@ Item {
             color: rowData && !rowData.enabled ? root.fainter : "transparent"
             Text { anchors.centerIn: parent; text: "off"; textFormat: Text.PlainText; color: rowData && !rowData.enabled ? root.foreground : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
             MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: if (rowData && rowData.enabled && rowData.canDisable) root.setEnabled(rowData.id, false) }
-          }
-        }
-      }
-      // revert (recently updated) — small, only when relevant
-      Rectangle {
-        visible: rowData && rowData.canRevert && !rowData.updateAvailable && !rowData.official
-        anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(22); height: Style.space(22); radius: height / 2
-        color: rvHover.containsMouse ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10) : "transparent"
-        border.color: root.hairline; border.width: 1
-        Text { anchors.centerIn: parent; text: "↺"; textFormat: Text.PlainText; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-        MouseArea { id: rvHover; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.revert(rowData.id) }
-      }
-      // remove — community only; compact ×, arms to a red confirm.
-      Rectangle {
-        visible: !(rowData && rowData.official)
-        anchors.verticalCenter: parent.verticalCenter
-        width: confirming ? Style.space(46) : Style.space(22); height: Style.space(22)
-        radius: height / 2
-        color: confirming ? root.dangerColor : (rmHover.containsMouse ? Qt.rgba(root.dangerColor.r, root.dangerColor.g, root.dangerColor.b, 0.15) : "transparent")
-        border.color: root.dangerColor; border.width: 1
-        Text { anchors.centerIn: parent; text: confirming ? "sure?" : "✕"; textFormat: Text.PlainText; color: confirming ? "#1a1005" : root.dangerColor; font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: confirming }
-        MouseArea {
-          id: rmHover; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-          onClicked: {
-            if (root.confirmRemoveId === rowData.id) root.removeConfirmed(rowData.id)
-            else root.askRemove(rowData.id)
           }
         }
       }
@@ -1166,32 +1186,13 @@ Item {
               color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22)
               Text { id: ofb; anchors.centerIn: parent; text: "OFFICIAL"; textFormat: Text.PlainText; color: root.accent; font.family: root.fontFamily; font.pixelSize: Style.font.caption - 2; font.bold: true }
             }
-            // THE update flag — clickable: it opens the review.
-            Rectangle {
-              visible: rowData && rowData.updateAvailable
-              width: upl.implicitWidth + Style.space(10); height: Style.space(16); radius: height / 2
-              color: root.warnColor
-              Text { id: upl; anchors.centerIn: parent; text: "UPDATE"; textFormat: Text.PlainText; color: "#1a1005"; font.family: root.fontFamily; font.pixelSize: Style.font.caption - 2; font.bold: true }
-              MouseArea {
-                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                onClicked: if (rowData && !rowData.locked) root.startReview(rowData.id)
-              }
-            }
-            // LOCKED badge — clickable: it unlocks.
-            Rectangle {
-              visible: rowData && rowData.locked
-              width: lkl.implicitWidth + Style.space(10); height: Style.space(16); radius: height / 2
-              color: "transparent"; border.color: root.fainter; border.width: 1
-              Text { id: lkl; anchors.centerIn: parent; text: "LOCKED"; textFormat: Text.PlainText; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption - 2 }
-              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggleLock(rowData.id, false) }
-            }
           }
         }
         Text {
           width: parent.width
           text: !rowData ? "" : confirming ? "remove this plugin?"
               : rowData.official ? (rowData.kinds || "built-in")
-              : rowData.updateAvailable ? (rowData.commitsBehind + " new change" + (rowData.commitsBehind === 1 ? "" : "s") + " · click UPDATE to review")
+              : rowData.updateAvailable ? (rowData.commitsBehind + " new change" + (rowData.commitsBehind === 1 ? "" : "s") + " · press update to review")
               : (rowData.id + (rowData.kinds ? " · " + rowData.kinds : ""))
           textFormat: Text.PlainText
           color: confirming ? root.dangerColor : root.dim
@@ -1445,7 +1446,6 @@ Item {
           spacing: Style.space(8)
           PlugButton { label: "Apply update"; onPicked: root.approveUpdate() }
           PlugButton { label: "Not now"; onPicked: root.cancelReview() }
-          PlugButton { label: "Lock at current version"; onPicked: { root.toggleLock(root.reviewId, true); root.cancelReview() } }
         }
       }
     }

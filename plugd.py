@@ -10,7 +10,7 @@ Claude for someone who does not read code.
 The panel gets the live installed/enabled list straight from the shell
 (`omarchy-shell shell listPlugins`). This engine writes an auxiliary state
 file keyed by plugin id that the panel joins onto that list: the update flag,
-the trust read, the lock state. Nothing here is on a timer of its own; the
+the trust read, the update history. Nothing here is on a timer of its own; the
 panel runs it, and an optional systemd timer runs `check-updates`.
 
 Standard library only. Reads and writes are capped and staged the same way
@@ -38,7 +38,10 @@ STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME")
                          or os.path.join(HOME, ".local/state"), "plug")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 CATALOG_FILE = os.path.join(STATE_DIR, "catalog.json")
-LOCKS_FILE = os.path.join(STATE_DIR, "locks.json")
+# Per-plugin update history: the commit an applied update came from (for
+# restore) and the last reviewed commit. Keeps its historic on-disk name so
+# bookkeeping recorded by earlier versions survives the upgrade.
+HISTORY_FILE = os.path.join(STATE_DIR, "locks.json")
 SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
 
 # The AI reviewer is the user's choice, so a published Plug does not assume
@@ -388,8 +391,8 @@ def read_manifest(dirpath):
     return m if isinstance(m, dict) else {}
 
 
-def load_locks():
-    d = read_json(LOCKS_FILE, 256 * 1024, {})
+def load_history():
+    d = read_json(HISTORY_FILE, 256 * 1024, {})
     return d if isinstance(d, dict) else {}
 
 
@@ -486,7 +489,7 @@ def snapshot(check_updates=False):
     check upstream."""
     prev = read_json(STATE_FILE, MAX_STATE_BYTES, {})
     prev_plugins = prev.get("plugins", {}) if isinstance(prev, dict) else {}
-    locks = load_locks()
+    hist = load_history()
     plugins = {}
     for pid, info in installed_ids().items():
         dirpath = info["dir"]
@@ -507,10 +510,8 @@ def snapshot(check_updates=False):
             "upstreamRef": gs["upstreamRef"],
             "trustScore": sc["trustScore"],
             "capabilities": sc["capabilities"],
-            "locked": bool(locks.get(pid, {}).get("locked")),
-            "pinnedSha": locks.get(pid, {}).get("pinnedSha", ""),
-            "reviewedSha": locks.get(pid, {}).get("reviewedSha", ""),
-            "previousSha": locks.get(pid, {}).get("previousSha", ""),
+            "reviewedSha": hist.get(pid, {}).get("reviewedSha", ""),
+            "previousSha": hist.get(pid, {}).get("previousSha", ""),
         }
         # Carry the last known update result unless we are refreshing it now.
         old = prev_plugins.get(pid, {})
@@ -521,8 +522,6 @@ def snapshot(check_updates=False):
         if check_updates:
             up = check_upstream(dirpath, gs)
             row.update(up)
-            # A locked plugin flags an update the same way, but the panel
-            # treats it as "changes waiting for your review", not "apply".
         plugins[pid] = row
     state = {"generatedAt": now_iso(), "pluginsDir": PLUGINS_DIR,
              "plugins": plugins}
@@ -794,7 +793,7 @@ def safe_id(pid):
     return stem
 
 
-# --------------------------------------------------- apply / lock
+# --------------------------------------------------- apply / rollback
 
 def apply_update(pid):
     """Move a plugin to the reviewed upstream commit and record that we have
@@ -806,22 +805,18 @@ def apply_update(pid):
     gs = git_state(dirpath)
     if not gs["isGit"] or not gs["upstreamRef"]:
         return {"error": "not a git checkout"}
-    # A locked plugin is pinned on purpose: refuse to move it until the user
-    # unlocks it. The panel offers "unlock to update" rather than a blind apply.
-    if load_locks().get(pid, {}).get("locked"):
-        return {"error": "locked — unlock it first to update"}
     before = gs["sha"]
     code, _, err = git(dirpath, "merge", "--ff-only", gs["upstreamRef"])
     if code != 0:
         return {"error": "could not fast-forward: %s" % err}
     _, newsha, _ = git(dirpath, "rev-parse", "HEAD")
-    locks = load_locks()
-    entry = locks.get(pid, {})
+    hist = load_history()
+    entry = hist.get(pid, {})
     entry["reviewedSha"] = newsha
     # Remember where we came from, so a bad update can be rolled back.
     entry["previousSha"] = before
-    locks[pid] = entry
-    write_atomic(LOCKS_FILE, locks)
+    hist[pid] = entry
+    write_atomic(HISTORY_FILE, hist)
     return {"ok": True, "id": pid, "sha": newsha}
 
 
@@ -831,7 +826,7 @@ def rollback(pid):
     inv = installed_ids()
     if pid not in inv:
         return {"error": "not installed"}
-    prev = load_locks().get(pid, {}).get("previousSha")
+    prev = load_history().get(pid, {}).get("previousSha")
     if not prev:
         return {"error": "no earlier version recorded to roll back to"}
     dirpath = inv[pid]["dir"]
@@ -840,26 +835,13 @@ def rollback(pid):
     code, _, err = git(dirpath, "reset", "--hard", prev)
     if code != 0:
         return {"error": "could not roll back: %s" % err}
-    locks = load_locks()
-    entry = locks.get(pid, {})
+    hist = load_history()
+    entry = hist.get(pid, {})
     entry["reviewedSha"] = prev
     entry.pop("previousSha", None)   # one step back; nothing further recorded
-    locks[pid] = entry
-    write_atomic(LOCKS_FILE, locks)
+    hist[pid] = entry
+    write_atomic(HISTORY_FILE, hist)
     return {"ok": True, "id": pid, "sha": prev}
-
-
-def set_lock(pid, locked):
-    locks = load_locks()
-    entry = locks.get(pid, {})
-    entry["locked"] = bool(locked)
-    if locked:
-        inv = installed_ids()
-        if pid in inv:
-            _, sha, _ = git(inv[pid]["dir"], "rev-parse", "HEAD")
-            entry["pinnedSha"] = sha
-    write_atomic(LOCKS_FILE, locks)
-    return {"ok": True, "id": pid, "locked": bool(locked)}
 
 
 # --------------------------------------------------- cli
@@ -871,7 +853,7 @@ def main():
     sub.add_parser("check-updates")
     sub.add_parser("catalog")
     sub.add_parser("agents")
-    for name in ("scan", "review", "apply", "rollback", "lock", "unlock"):
+    for name in ("scan", "review", "apply", "rollback"):
         p = sub.add_parser(name)
         p.add_argument("id")
     args = ap.parse_args()
@@ -907,10 +889,6 @@ def main():
         print(json.dumps(apply_update(args.id)))
     elif args.cmd == "rollback":
         print(json.dumps(rollback(args.id)))
-    elif args.cmd == "lock":
-        print(json.dumps(set_lock(args.id, True)))
-    elif args.cmd == "unlock":
-        print(json.dumps(set_lock(args.id, False)))
 
 
 if __name__ == "__main__":
