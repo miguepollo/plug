@@ -24,12 +24,10 @@ English, whether it is safe.
   part of Omarchy, not an installed copy, so there is nothing to update or
   remove).
 - **The trust dot** on each row is a quick capability read of the plugin's
-  source: what it can reach, run and write. It scores only code that actually
-  runs — comments are dropped, so is text the plugin merely displays, and a
-  command quoted for you to copy yourself counts far more lightly than one the
-  plugin runs. A long line is only treated as packed or encoded content when
-  nothing breaks it up, so honest data — a coastline, a lookup table — is not
-  mistaken for something hidden.
+  source: what it can reach, run and write. It scores code that runs. Comments
+  are ignored, as is text the plugin displays, and a command quoted for you to
+  copy yourself counts far more lightly than one the plugin runs itself. A long
+  line counts as packed or encoded content only when nothing breaks it up.
 - **Review an update** — Plug fetches the exact changes, runs a fast offline
   scan, and hands the diff to your chosen AI reviewer (read-only). You get a
   **safe / be careful / do not** verdict, a plain-English summary of what
@@ -37,8 +35,7 @@ English, whether it is safe.
   decide. It also judges the update the way the marketplace's own approval
   checks do (new privileges, downloads, network hosts, background processes, or
   writes outside the plugin). The reviewer is told which question it is
-  answering: judging code that has never been on your machine is not the same
-  as judging a change to code you already trust.
+  answering — a first install, or a change to something already installed.
 - **Restore** — undo the last update you applied, returning the plugin to the
   version it was on before. Plug then flags the update as available again, so
   nothing is lost — you can re-apply it whenever you are ready.
@@ -73,10 +70,10 @@ Claude account you already set up in the terminal; Plug never sees a password or
 key. If the tool is not signed in, the review falls back to the offline scan.
 
 **Privacy.** A cloud agent (Claude, Codex, Gemini) is sent the code it is asked
-to judge, and only then: the diff when you review an update, and the plugin's
-full source when you check one before installing it. Both are public code from a
-public repository, but it does leave your machine. Choosing a local server
-(Ollama, LM Studio) or the offline scan keeps everything on it.
+to judge, and only then: the diff when you review an update, the plugin's full
+source when you check one before installing it. That code is public and comes
+from a public repository, but it does leave your machine. A local server (Ollama,
+LM Studio) or the offline scan keeps everything on it.
 
 ## Install
 
@@ -145,18 +142,16 @@ the marketplace catalog on `raw.githubusercontent.com`; and, when you review an
 update with a cloud agent, that provider — never otherwise. A local-server
 reviewer stays on `localhost`.
 
-**Restarting the shell.** New plugin code sits unused until the shell restarts:
-the running shell keeps the copy it loaded at startup, and asking it to rescan
-its plugins only refreshes which plugins exist, not their code. So applying an
-update or a restore ends with a shell restart — otherwise you would be told the
-update was applied while the old version carried on running, which is exactly
-the trap Plug exists to close. Your windows and workspaces are untouched; the
-bar and the panels reload. Nothing else Plug does restarts anything.
+**Restarting the shell.** Applying an update or a restore ends with a shell
+restart, because that is what makes changed plugin code take effect: the running
+shell keeps the copy it loaded at startup, and a plugin rescan refreshes only
+which plugins exist, not their code. Your windows and workspaces are untouched;
+the bar and the panels reload. Nothing else Plug does restarts anything.
 
 **Timers and background work:** none that runs on its own. The jobs you start —
-install, remove, update, restore, on/off — do outlive Plug's own window,
-because the reload that finishes them also closes it; each one ends by
-reopening Plug on the plugin it acted on and telling you what happened.
+install, remove, update, restore, on/off — outlive Plug's own window, since the
+reload that finishes them also closes it. Each one ends by reopening Plug on the
+plugin it acted on and telling you what happened.
 
 Everything runs as your own user.
 
