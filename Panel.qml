@@ -197,8 +197,11 @@ Item {
     root.tab = "installed"
     root.selectedIndex = 0
     root.confirmRemoveId = ""
-    root.reviewId = ""
-    root.reviewData = null
+    // A detached job ends by summoning Plug, which lands here. If a Store
+    // install-review was on screen the overlay went away but the MODE did
+    // not, so the next press of update on an installed row ran an install of
+    // the old store plugin instead. Clear the whole review, not its surface.
+    root.cancelReview()
     root.noticeText = ""
     root.pendingHighlight = ""
     root.busy = false; root.busyNote = ""
@@ -210,12 +213,12 @@ Item {
     try { payload = JSON.parse(String(payloadJson || "")) } catch (e) { payload = null }
     if (payload && typeof payload === "object") {
       if (payload.highlight) root.pendingHighlight = String(payload.highlight)
-      if (payload.error && String(payload.error).indexOf("MOVED ") === 0) {
+      if (payload.error && String(payload.error).indexOf("MOVED\t") === 0) {
         // Nothing was installed. The author pushed since the review, so the
         // choice is the user's: read the new version, or take the one they
         // already approved.
-        var bits = String(payload.error).split(" ")
-        root.movedName = bits.length > 1 ? bits[1] : "That plugin"
+        var bits = String(payload.error).split("\t")
+        root.movedName = bits.length > 1 && bits[1] !== "" ? bits[1] : "That plugin"
         root.movedSha = bits.length > 2 ? bits[2] : ""
         root.noticeText = ""
       } else if (payload.error) {
@@ -223,7 +226,9 @@ Item {
       }
       else if (payload.notice) root.noticeText = String(payload.notice)
     }
-    root.refreshAll()
+    // refreshAll() is driven by `opened` changing, which the line above has
+    // just done. Calling it here as well ran the whole scan of every
+    // installed plugin two and three times over on a single summon.
     // Freshen the update flags in the background so they are current without
     // pressing the button — offline flags show immediately, the network check
     // updates them a moment later.
@@ -233,7 +238,12 @@ Item {
 
   Timer { id: autoCheckTimer; interval: 500; onTriggered: if (root.opened) root.checkUpdates() }
 
+  // The host's hide() calls close() back before it clears its own record of
+  // the panel being open, so an unguarded close() recurses — close, hide,
+  // close — until the JS stack gives out, inside a shell that stays up for
+  // days. Pressing Escape was enough. Being closed already is the exit.
   function close() {
+    if (!root.opened) return
     root.opened = false
     root.confirmRemoveId = ""
     if (root.shell && typeof root.shell.hide === "function")
@@ -440,6 +450,8 @@ Item {
   // The review gate. Running review invokes the chosen AI agent read-only on
   // the diff; when it lands we read review-<id>.json and show the verdict.
   function startReview(id) {
+    root.reviewMode = "update"
+    root.installCandidate = null
     root.reviewId = id
     root.reviewData = null
     root.reviewRunning = true
@@ -456,7 +468,10 @@ Item {
         try {
           var d = JSON.parse(text)
           if (d && d.review) root.reviewData = d
-          else if (d && d.error) root.noticeText = "Review failed: " + d.error
+          else if (d && d.error) {
+            root.noticeText = "Review failed: " + d.error
+            root.cancelReview()
+          }
         } catch (e) {}
       }
     }
@@ -761,6 +776,13 @@ Item {
       focus: true
       Keys.onPressed: function(e) {
         if (root.capturing) { root.captureKey(e); e.accepted = true; return }
+        // The "changed while you were reading it" question owns the keyboard
+        // while it is up; Escape dismisses it.
+        if (root.movedName !== "" && root.reviewId === "") {
+          if (e.key === Qt.Key_Escape) { root.movedName = ""; root.movedSha = "" }
+          e.accepted = true
+          return
+        }
         // Review overlay: Enter approves, Esc backs out.
         if (root.reviewId !== "") {
           if (e.key === Qt.Key_Escape) { root.cancelReview(); e.accepted = true }
@@ -1017,9 +1039,15 @@ Item {
           // installed. Both ways forward are offered plainly, because either
           // is reasonable and only the user can choose.
           Rectangle {
+            id: movedScreen
             visible: root.movedName !== "" && root.reviewId === ""
             anchors.fill: parent
             color: root.background
+            // Opaque is not the same as blocking: without this the list
+            // underneath still took the clicks and the keys, so Enter toggled
+            // a plugin and x twice removed one while the user believed they
+            // were answering the question on screen.
+            MouseArea { anchors.fill: parent; hoverEnabled: true }
             Column {
               anchors.centerIn: parent
               width: parent.width - Style.space(60)
@@ -1764,13 +1792,15 @@ Item {
         Row {
           spacing: Style.space(8)
           PlugButton {
-            label: root.reviewMode !== "install" ? "Apply update"
-                 : (root.reviewData && root.reviewData.review
-                    && root.reviewData.review.verdict === "DANGER") ? "Install anyway"
-                 : "Install"
-            danger: root.reviewMode === "install" && root.reviewData
-                    && root.reviewData.review
-                    && root.reviewData.review.verdict === "DANGER"
+            readonly property bool refused: root.reviewData && root.reviewData.review
+                                            && root.reviewData.review.verdict === "DANGER"
+            label: root.reviewMode !== "install"
+                 ? (refused ? "Apply anyway" : "Apply update")
+                 : (refused ? "Install anyway" : "Install")
+            // The update path is the one people meet again and again, and a
+            // DANGER verdict there used to read "Apply update" in ordinary
+            // styling, with Enter applying it unremarked.
+            danger: refused
             onPicked: root.approveUpdate()
           }
           PlugButton { label: root.reviewMode === "install" ? "Cancel" : "Not now"; onPicked: root.cancelReview() }

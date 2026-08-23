@@ -225,10 +225,16 @@ def git_capped(dirpath, *args, timeout=GIT_TIMEOUT, cap=MAX_GIT_BYTES):
                 raise
             err = proc.stderr.read(64 * 1024)
         finally:
-            if proc.poll() is None:
+            # Wait first, kill only if it will not go. git's pipes reach EOF
+            # while it is still exiting, so killing unconditionally here could
+            # SIGKILL a command that had just succeeded and return -9 —
+            # which callers read as "not a git checkout" or "fetch failed".
+            try:
+                code = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 proc.kill()
+                code = proc.wait(timeout=5)
             proc.stderr.close()
-            code = proc.wait(timeout=5)
         data = out or b""
         # Measured in bytes, because `head -c` cuts bytes. Counting the
         # characters they decode to is not the same number: any non-ASCII
@@ -1062,6 +1068,41 @@ def parse_review(raw):
             "ok": verdict != "UNKNOWN", "raw": raw[:MAX_AGENT_BYTES]}
 
 
+def scan_tree_at(dirpath, ref):
+    """The capability read of a checkout as it would be AFTER moving to `ref`,
+    taken from a throwaway extraction of that tree so nothing on disk moves.
+    Returns None if the tree could not be extracted, and the caller falls back
+    to what is installed rather than reporting nothing."""
+    tmp = tempfile.mkdtemp(prefix="plug-tree-")
+    try:
+        cmd = ["git", "-C", dirpath,
+               "-c", "core.hooksPath=/dev/null",
+               "archive", "--format=tar", ref]
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0",
+               "GIT_CONFIG_NOSYSTEM": "1", "HOME": HOME}
+        try:
+            git_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, env=env)
+            tar = subprocess.Popen(["tar", "-x", "-C", tmp],
+                                   stdin=git_proc.stdout,
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+            git_proc.stdout.close()
+            tar.communicate(timeout=GIT_TIMEOUT)
+            if git_proc.poll() is None:
+                git_proc.kill()
+            git_proc.wait(timeout=5)
+            if tar.returncode != 0:
+                return None
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if dir_bytes(tmp, MAX_CLONE_BYTES) > MAX_CLONE_BYTES:
+            return None
+        return scan_plugin(tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def review(pid):
     """Fetch the incoming changes for one plugin, scan them, and get Claude's
     plain-English read. Writes review-<id>.json for the panel."""
@@ -1083,8 +1124,12 @@ def review(pid):
     _, logtext, _ = git(dirpath, "log", "--no-merges", "--format=%s",
                         "HEAD..%s" % to_ref)
     changelog = [l.strip() for l in logtext.split("\n") if l.strip()][:20]
-    # Scan only the files the diff touches, against the fetched upstream tree.
-    scan = scan_plugin(dirpath)  # current-tree capabilities as context
+    # Scan the code the update would install, not the code already installed.
+    # The prompt calls this "what the updated plugin can do", and it was the
+    # working tree at HEAD — so an update that newly reaches for ~/.ssh or
+    # pipes a download into a shell was described to the reviewer as having no
+    # capabilities at all, next to a trust score belonging to the old version.
+    scan = scan_tree_at(dirpath, to_ref) or scan_plugin(dirpath)
     facts = {"trustScore": scan["trustScore"],
              "capabilities": scan["capabilities"],
              # Told apart so the reviewer knows which of these the plugin

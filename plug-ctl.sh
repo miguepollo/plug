@@ -47,6 +47,10 @@ DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # single call leaves an orphan behind pointing at a plugin that is on its way
 # out. The config is the authority here, not the command's own "ok", which it
 # reports even when there was nothing left to clear.
+# Exit 0 = still referenced, 1 = not referenced, 2 = could not be read.
+# Treating "could not read" as "not referenced" made clear_refs report success
+# having changed nothing, so disable said "Disabled" while the plugin ran on,
+# and remove deleted the directory with the config still pointing at it.
 refs_left() {
   omarchy-shell shell listShellConfig 2>/dev/null | python3 -c '
 import json, sys
@@ -54,9 +58,9 @@ want = sys.argv[1]
 try:
     c = json.load(sys.stdin)
 except Exception:
-    sys.exit(1)
+    sys.exit(2)
 if not isinstance(c, dict):
-    sys.exit(1)
+    sys.exit(2)
 def eid(w):
     return w.get("id") if isinstance(w, dict) else w
 seen = []
@@ -94,13 +98,20 @@ sys.exit(1)' "$1"; then
 # Two locations is the normal worst case; the cap stops a config that will not
 # settle from spinning here forever.
 clear_refs() {
-  local id="$1" out i
+  local id="$1" out i rc
   for i in 1 2 3 4 5; do
-    refs_left "$id" || return 0
+    refs_left "$id"; rc=$?
+    if (( rc == 2 )); then
+      echo "could not read the shell configuration"
+      return 1
+    fi
+    (( rc == 1 )) && return 0
     out=$(omarchy-shell shell setPluginEnabled "$id" false 2>&1) || true
     [[ $out == "ok" ]] || { echo "${out:-setPluginEnabled produced no output}"; return 1; }
   done
-  if refs_left "$id"; then echo "still referenced"; return 1; fi
+  refs_left "$id"; rc=$?
+  if (( rc == 0 )); then echo "still referenced"; return 1; fi
+  if (( rc == 2 )); then echo "could not read the shell configuration"; return 1; fi
   return 0
 }
 
@@ -175,7 +186,7 @@ case "$1" in
     hyprctl reload >/dev/null 2>&1 || true
     ;;
   bar)
-    python3 - "$2" "${3:-right}" <<'PY'
+    barerr=$(python3 - "$2" "${3:-right}" 2>&1 >/dev/null <<'PY'
 import json, os, stat, sys, tempfile
 state = sys.argv[1]
 sec = sys.argv[2] if sys.argv[2] in ("left", "center", "right") else "right"
@@ -185,11 +196,21 @@ p = os.path.expanduser("~/.config/omarchy/shell.json")
 # before it is rewritten. The open refuses symlinks and non-regular files, so
 # a planted link cannot redirect the read and a FIFO cannot block it forever.
 MAX_SHELL_JSON = 4 * 1024 * 1024
+
+
+def fail(why):
+    """Say what went wrong. Every one of these used to be a silent exit 0, and
+    the branch reported nothing at all, so "show in bar" could do nothing with
+    no error anywhere."""
+    sys.stderr.write(why + "\n")
+    raise SystemExit(1)
+
+
 try:
     fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise SystemExit
+            fail("%s is not a plain file" % p)
         with os.fdopen(fd, "rb") as f:
             fd = None
             raw = f.read(MAX_SHELL_JSON + 1)
@@ -197,14 +218,14 @@ try:
         if fd is not None:
             os.close(fd)
     if len(raw) > MAX_SHELL_JSON:
-        raise SystemExit
+        fail("%s is larger than %d bytes" % (p, MAX_SHELL_JSON))
     d = json.loads(raw.decode("utf-8", "replace"))
 except SystemExit:
     raise
-except Exception:
-    raise SystemExit
+except Exception as e:
+    fail("could not read %s: %s" % (p, e))
 if not isinstance(d, dict):
-    raise SystemExit
+    fail("%s is not a JSON object" % p)
 def eid(w): return w.get("id") if isinstance(w, dict) else w
 if not isinstance(d.get("bar"), dict):
     d["bar"] = {}
@@ -231,9 +252,9 @@ home_cfg = os.path.dirname(p)
 try:
     st = os.stat(home_cfg)
     if st.st_uid != os.getuid() or (st.st_mode & 0o022):
-        raise SystemExit
-except OSError:
-    raise SystemExit
+        fail("%s is not owner-only" % home_cfg)
+except OSError as e:
+    fail("could not check %s: %s" % (home_cfg, e))
 fd, tmp = tempfile.mkstemp(prefix=".shell.json.", suffix=".tmp", dir=home_cfg)
 try:
     with os.fdopen(fd, "w") as f:
@@ -251,6 +272,12 @@ except BaseException:
         pass
     raise
 PY
+)
+    if [[ -n $barerr ]]; then
+      finish "" "" "$(last_line "$barerr")"
+    else
+      finish "" "Bar icon updated" ""
+    fi
     ;;
   remove)
     id="$2"
@@ -279,7 +306,10 @@ PY
     [[ -n $id ]] || exit 2
     err=""
     deferred=0
-    if out=$(python3 "$DIR/plugd.py" "$verb" "$id" 2>&1); then
+    # stdout only: merging stderr in meant one warning line made the JSON
+    # unparseable, the parser read "unparseable" as "no error", and a REFUSED
+    # update was reported as "Updated" — and then restarted the shell.
+    if out=$(python3 "$DIR/plugd.py" "$verb" "$id" 2>/dev/null); then
       # Report what the engine reported: it answers with an error field rather
       # than a failing exit status when git refuses the operation.
       err=$(printf '%s' "$out" | python3 -c '
@@ -356,7 +386,10 @@ else: print(d.get("now") or "unknown")')
     fi
 
     if [[ -n $moved ]]; then
-      finish "" "" "MOVED $name $moved"
+      # Tab-separated: a display name has spaces in it ("FPL Gaffer"), and
+      # splitting on spaces told the user "FPL changed while you were reading
+      # it" and took "Gaffer" for the commit.
+      finish "" "" "$(printf 'MOVED\t%s\t%s' "$name" "$moved")"
       exit 0
     fi
 
@@ -375,9 +408,14 @@ else: print(d.get("now") or "unknown")')
     # what matters. If it is not the reviewed commit, pin it to that commit;
     # if it cannot be pinned, remove it rather than leave unreviewed code
     # installed.
+    if [[ -z $err && -n $sha && -z $pid ]]; then
+      err="installed, but its plugin id was unknown so the version could not be checked"
+    fi
     if [[ -z $err && -n $sha && -n $pid ]]; then
       d="$HOME/.config/omarchy/plugins/$pid"
-      if [[ -d $d/.git ]]; then
+      if [[ ! -d $d/.git ]]; then
+        err="installed, but $pid is not where it was expected, so the version could not be checked"
+      else
         head=$(git -C "$d" rev-parse HEAD 2>/dev/null || echo "")
         if [[ $head != "$sha" ]]; then
           if git -C "$d" cat-file -t "$sha" >/dev/null 2>&1 &&
