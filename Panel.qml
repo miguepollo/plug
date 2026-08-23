@@ -209,9 +209,21 @@ Item {
       root.movedName = ""; root.movedSha = ""
     }
     jobWatchdog.stop()
+    jobPoll.stop(); root.jobPollsLeft = 0
     var payload = null
     try { payload = JSON.parse(String(payloadJson || "")) } catch (e) { payload = null }
     if (payload && typeof payload === "object") {
+      // A payload carrying anything means a job just reported back. The shell
+      // updates its own registry a moment after the change lands, so a single
+      // read here can arrive before the answer has changed — and with nothing
+      // asking again, a switch kept its old position until the panel was
+      // closed and reopened. Ask a few more times, whoever started the job. A
+      // plain open carries nothing and is left alone: each of these re-scans
+      // every installed plugin.
+      if (payload.notice || payload.error || payload.highlight) {
+        root.jobPollsLeft = 6
+        jobPoll.restart()
+      }
       if (payload.highlight) root.pendingHighlight = String(payload.highlight)
       if (payload.error && String(payload.error).indexOf("MOVED\t") === 0) {
         // Nothing was installed. The author pushed since the review, so the
@@ -423,7 +435,30 @@ Item {
   function runJob(args, note) {
     root.busy = true; root.busyNote = note
     jobWatchdog.restart()
+    root.jobPollsLeft = 8
+    jobPoll.restart()
     Quickshell.execDetached(["bash", root.pluginDir + "/plug-ctl.sh"].concat(args))
+  }
+
+  // A job that unloads the panel is followed by a summon, which reopens it and
+  // re-reads everything. A job that does NOT — switching a plugin on or off —
+  // leaves the panel standing, and summoning something already on screen does
+  // nothing, so nothing was re-read: the switch kept its old position until the
+  // panel was closed and opened again. The work happens in another process, so
+  // the answer is not ready the moment the click lands; ask a few times.
+  property int jobPollsLeft: 0
+  Timer {
+    id: jobPoll
+    interval: 700
+    repeat: true
+    onTriggered: {
+      root.refreshAll()
+      root.jobPollsLeft -= 1
+      if (root.jobPollsLeft <= 0) {
+        stop()
+        root.busy = false; root.busyNote = ""
+      }
+    }
   }
   // A job that unloads the panel takes this state with it, and the summon that
   // follows clears it. A job that does not — toggling a plugin with no window
@@ -435,8 +470,56 @@ Item {
     onTriggered: { root.busy = false; root.busyNote = ""; root.refreshAll() }
   }
 
+  // Switching a plugin on or off tears nothing down — unlike installing,
+  // removing, updating or restoring, each of which ends with the shell
+  // reloading and this panel with it. So this one is run attached and waited
+  // for, and the state is re-read when the command has actually returned.
+  // Detaching it meant reading once on a timer and hoping the shell had caught
+  // up, which it often had not: the switch kept its old position until the
+  // panel was closed and reopened.
+  //
+  // The exception is a plugin that owns a panel of its own: toggling one of
+  // those rebuilds every panel delegate and takes this window with it, so
+  // there is nothing left to receive the answer. Those keep the detached
+  // runner, which summons Plug back when it is done.
+  function ownsAPanel(id) {
+    for (var i = 0; i < root.livePlugins.length; i++) {
+      var p = root.livePlugins[i]
+      if (p.id !== id) continue
+      var k = p.kinds || []
+      return k.indexOf("panel") >= 0 || k.indexOf("overlay") >= 0 || k.indexOf("menu") >= 0
+    }
+    return false
+  }
+
   function setEnabled(id, on) {
-    root.runJob([on ? "enable" : "disable", id], (on ? "Enabling " : "Disabling ") + "…")
+    if (root.ownsAPanel(id)) {
+      root.runJob([on ? "enable" : "disable", id], (on ? "Enabling" : "Disabling") + "…")
+      return
+    }
+    root.busy = true
+    root.busyNote = (on ? "Enabling" : "Disabling") + "…"
+    root.togglingId = id
+    toggleProc.command = ["bash", root.pluginDir + "/plug-ctl.sh",
+                          on ? "enable" : "disable", id, "--attached"]
+    toggleProc.running = false
+    toggleProc.running = true
+  }
+
+  property string togglingId: ""
+  Process {
+    id: toggleProc
+    stderr: StdioCollector { id: toggleErr; waitForEnd: true }
+    onExited: function(code) {
+      root.busy = false; root.busyNote = ""
+      var err = (toggleErr.text || "").trim().split("\n").pop()
+      root.noticeText = code === 0
+        ? "" : ("Could not switch " + root.togglingId + (err ? " — " + err : ""))
+      root.pendingHighlight = root.togglingId
+      root.togglingId = ""
+      // Read what actually happened, now that it has finished happening.
+      root.refreshAll()
+    }
   }
 
   // ------------------------------------------------------------------ remove

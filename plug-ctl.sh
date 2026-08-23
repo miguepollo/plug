@@ -409,6 +409,10 @@ if isinstance(d, dict) and d.get("error"):
     fi
     if [[ $verb == apply ]]; then note="Updated $id"; else note="Restored $id to its previous version"; fi
     if (( deferred )); then note="$note — it loads when the shell next restarts"; fi
+    if [[ -n $attached ]]; then
+      [[ -n $err ]] && { echo "$err" >&2; exit 1; }
+      exit 0
+    fi
     if [[ -n $err ]]; then finish "$id" "" "$err"; else finish "$id" "$note" ""; fi
     ;;
   install)
@@ -511,6 +515,12 @@ else: print(d.get("now") or "unknown")')
     ;;
   enable | disable)
     id="$2"
+    # --attached: the panel is waiting for this and will re-read the state
+    # itself, so there is nobody to summon and no reason to. Without it the
+    # job summons Plug back, which is what a plugin that tears its own panel
+    # down needs.
+    attached=""
+    [[ ${3:-} == "--attached" ]] && attached=1
     [[ -n $id ]] || exit 2
     err=""
     if [[ $1 == enable ]]; then
