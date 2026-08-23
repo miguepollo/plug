@@ -106,6 +106,11 @@ GIT_TIMEOUT = 25
 # short enough that a repository that will not answer does not hold the panel.
 CLONE_TIMEOUT = 90
 CLAUDE_TIMEOUT = 180
+# A reviewer's answer is a few paragraphs. This is the ceiling on what is read
+# back from one, whether it is a local command or a server on localhost: the
+# panel renders it inside a shell process that stays up for days, so a reply
+# that never stops must not be held whole on the way there.
+MAX_AGENT_BYTES = 512 * 1024
 
 
 # --------------------------------------------------------------- hygiene
@@ -780,7 +785,10 @@ def openai_chat(base, model, system, user):
         headers={"Content-Type": "application/json",
                  "User-Agent": "plug/0.1"})
     with urllib.request.urlopen(req, timeout=CLAUDE_TIMEOUT) as r:
-        raw = r.read(4 * 1024 * 1024)
+        # One byte over the ceiling is what identifies an oversized reply.
+        raw = r.read(MAX_AGENT_BYTES + 1)
+    if len(raw) > MAX_AGENT_BYTES:
+        raise ValueError("reviewer replied with more than %d bytes" % MAX_AGENT_BYTES)
     doc = json.loads(raw.decode("utf-8", "replace"))
     choices = doc.get("choices") if isinstance(doc, dict) else None
     if choices and isinstance(choices, list):
@@ -868,10 +876,28 @@ def run_agent(diff, scan_facts, plugin_name, context="update"):
 
             empty = tempfile.mkdtemp(prefix="plug-review-")
             try:
-                r = subprocess.run(cmd, capture_output=True, text=True,
-                                   timeout=CLAUDE_TIMEOUT, cwd=empty,
-                                   env={**os.environ, "HOME": HOME})
-                raw = (r.stdout or "").strip()
+                # The ceiling goes at the read, not after it: the agent's
+                # output passes through `head -c`, which stops the pipe at the
+                # limit rather than letting an endless reply accumulate here.
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    cwd=empty, env={**os.environ, "HOME": HOME})
+                try:
+                    capper = subprocess.Popen(
+                        ["head", "-c", str(MAX_AGENT_BYTES)],
+                        stdin=proc.stdout, stdout=subprocess.PIPE)
+                    proc.stdout.close()
+                    try:
+                        out, _ = capper.communicate(timeout=CLAUDE_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        capper.kill()
+                        out, _ = capper.communicate()
+                        raise
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=5)
+                raw = (out or b"").decode("utf-8", "replace").strip()
             finally:
                 try:
                     os.rmdir(empty)
@@ -922,9 +948,13 @@ def parse_review(raw):
             changed.append(s.lstrip("-*• ").strip())
         elif section == "watch" and s:
             watch = (watch + " " + s).strip()
-    return {"verdict": verdict, "headline": headline or "(no headline)",
-            "whatChanged": changed[:8], "watchFor": watch or "nothing notable",
-            "ok": verdict != "UNKNOWN", "raw": raw}
+    # Every one of these is rendered in the panel, so each is capped on the way
+    # out as well as on the way in.
+    return {"verdict": verdict,
+            "headline": (headline or "(no headline)")[:300],
+            "whatChanged": [c[:400] for c in changed[:8]],
+            "watchFor": (watch or "nothing notable")[:1000],
+            "ok": verdict != "UNKNOWN", "raw": raw[:MAX_AGENT_BYTES]}
 
 
 def review(pid):

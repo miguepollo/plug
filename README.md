@@ -64,10 +64,10 @@ tools you actually have:
 Interactive apps such as ChatGPT Desktop or Grok Bot are not offered: they are
 windows, not something Plug can call for a one-shot review.
 
-However Plug talks to a command-line or local reviewer, it never handles your
-login: it relies on that tool's own sign-in. If you use Claude Code, it uses the
-Claude account you already set up in the terminal; Plug never sees a password or
-key. If the tool is not signed in, the review falls back to the offline scan.
+Authentication belongs to the reviewer you chose: Plug runs its command, and
+that command uses the sign-in it already has. With Claude Code, that is the
+Claude account set up in your terminal. If the tool is not signed in, the review
+falls back to the offline scan.
 
 **Privacy.** A cloud agent (Claude, Codex, Gemini) is sent the code it is asked
 to judge, and only then: the diff when you review an update, the plugin's full
