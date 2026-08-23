@@ -1410,9 +1410,6 @@ Item {
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             font.bold: true
-            // Underlined while the row is under the cursor, so the link is
-            // discoverable rather than a secret.
-            font.underline: sHover.containsMouse && cData && cData.repo
           }
           // Omarchy's own — clearly marked, and never installed or managed here.
           Rectangle {
