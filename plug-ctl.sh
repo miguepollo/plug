@@ -8,6 +8,20 @@
 #   plug-ctl.sh unbind             remove that block
 #   plug-ctl.sh bar on|off [sec]   add/remove the Plug icon in the bar layout
 #                                  (~/.config/omarchy/shell.json)
+#
+# It is also the detached runner for the jobs that cannot run inside the panel:
+#
+#   plug-ctl.sh remove <id>        uninstall a plugin
+#   plug-ctl.sh apply <id>         apply the reviewed update
+#   plug-ctl.sh rollback <id>      restore the version before the last update
+#   plug-ctl.sh install <url> <nm> install from the store
+#   plug-ctl.sh enable|disable <id>  turn a plugin on or off
+#
+# Each of those ends with the shell reloading its plugins, and a reload unloads
+# every open panel — Plug's own window included. A job running inside the panel
+# is therefore killed at the moment its work lands, taking the result message
+# with it, which is why these run detached from the panel and summon Plug back
+# afterwards with what happened.
 set -e
 
 ID="io.github.weedwhitesandwine.plug"
@@ -22,6 +36,82 @@ strip_block() {
     !skip { print }
   ' "$BIND_FILE"
 }
+
+# ---------------------------------------------------------------- job helpers
+
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# Is this id still referenced anywhere in the live shell config? Turning a
+# plugin off clears ONE reference per call, and anything installed the usual
+# way is referenced twice — once as a plugin, once as a bar widget — so a
+# single call leaves an orphan behind pointing at a plugin that is on its way
+# out. The config is the authority here, not the command's own "ok", which it
+# reports even when there was nothing left to clear.
+refs_left() {
+  omarchy-shell shell listShellConfig 2>/dev/null | python3 -c '
+import json, sys
+want = sys.argv[1]
+try:
+    c = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(c, dict):
+    sys.exit(1)
+def eid(w):
+    return w.get("id") if isinstance(w, dict) else w
+seen = []
+lay = (c.get("bar") or {}).get("layout")
+for sec in (lay.values() if isinstance(lay, dict) else (lay or [])):
+    for w in (sec or []):
+        seen.append(eid(w))
+for w in (c.get("plugins") or []):
+    seen.append(eid(w))
+sys.exit(0 if want in seen else 1)' "$1"
+}
+
+# Clear every reference, checking the config rather than trusting the reply.
+# Two locations is the normal worst case; the cap stops a config that will not
+# settle from spinning here forever.
+clear_refs() {
+  local id="$1" out i
+  for i in 1 2 3 4 5; do
+    refs_left "$id" || return 0
+    out=$(omarchy-shell shell setPluginEnabled "$id" false 2>&1) || true
+    [[ $out == "ok" ]] || { echo "${out:-setPluginEnabled produced no output}"; return 1; }
+  done
+  if refs_left "$id"; then echo "still referenced"; return 1; fi
+  return 0
+}
+
+# Bring Plug back up with the outcome. The shell may be mid-teardown, mid-
+# rebuild, or (after an update) still starting up again, so wait for it to
+# answer before summoning and keep trying for a while after that.
+finish() {
+  local highlight="$1" notice="$2" err="$3" payload i
+  payload=$(python3 -c '
+import json, sys
+h, n, e = sys.argv[1], sys.argv[2], sys.argv[3]
+d = {}
+if h: d["highlight"] = h
+if e: d["error"] = e
+elif n: d["notice"] = n
+print(json.dumps(d))' "$highlight" "$notice" "$err")
+  for i in $(seq 1 60); do
+    [[ $(omarchy-shell shell ping 2>/dev/null) ]] && break
+    sleep 0.5
+  done
+  # Let the panel teardown settle so the payload is queued for the NEW panel
+  # rather than eaten by the dying one.
+  sleep 0.6
+  for i in $(seq 1 20); do
+    [[ $(omarchy-shell shell summon "$ID" "$payload" 2>/dev/null) == "ok" ]] && return 0
+    sleep 0.5
+  done
+  return 0
+}
+
+# The last line is what a failing command actually said; the rest is noise.
+last_line() { printf '%s' "$1" | tail -n 1; }
 
 case "$1" in
   bind)
@@ -141,8 +231,101 @@ except BaseException:
     raise
 PY
     ;;
+  remove)
+    id="$2"
+    [[ -n $id ]] || exit 2
+    err=""
+    # Every reference goes first. The uninstall command clears only one itself,
+    # and by the time it has deleted the directory an orphan entry points at
+    # nothing.
+    err=$(clear_refs "$id") || true
+    if [[ -z $err ]]; then
+      # Judge it by whether it succeeded, never by whether it printed
+      # something: a command that dies silently prints nothing at all, and
+      # reading that as success reported failed removals as clean ones.
+      if out=$(omarchy plugin remove "$id" --yes 2>&1); then
+        :
+      else
+        err=$(last_line "$out")
+        [[ -n $err ]] || err="omarchy plugin remove failed"
+      fi
+    fi
+    if [[ -n $err ]]; then finish "$id" "" "$err"; else finish "" "Removed $id" ""; fi
+    ;;
+  apply | rollback)
+    verb="$1"
+    id="$2"
+    [[ -n $id ]] || exit 2
+    err=""
+    deferred=0
+    if out=$(python3 "$DIR/plugd.py" "$verb" "$id" 2>&1); then
+      # Report what the engine reported: it answers with an error field rather
+      # than a failing exit status when git refuses the operation.
+      err=$(printf '%s' "$out" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(d, dict) and d.get("error"):
+    print(str(d["error"]))')
+    else
+      err=$(last_line "$out")
+      [[ -n $err ]] || err="plug engine failed"
+    fi
+    if [[ -z $err ]]; then
+      # The new code is on disk, but the shell is still running the copy it
+      # loaded at startup — and it keeps running it. Asking it to rescan its
+      # plugins is not enough: a rescan re-reads which plugins exist, so
+      # installs and removals show up, but already-loaded plugin code stays
+      # cached. Only a restart actually picks up changed code, which is the
+      # step that makes an update take effect at all. It is also what unloads
+      # this panel, which is why this runs detached and summons Plug back.
+      #
+      # Never while the screen is locked: restarting the shell there takes the
+      # lock screen with it. A locked screen means nobody pressed the button,
+      # so the reload simply waits for the next restart.
+      if omarchy-hyprland-session-locked 2>/dev/null; then
+        deferred=1
+      else
+        omarchy-restart-shell >/dev/null 2>&1 || true
+      fi
+    fi
+    if [[ $verb == apply ]]; then note="Updated $id"; else note="Restored $id to its previous version"; fi
+    if (( deferred )); then note="$note — it loads when the shell next restarts"; fi
+    if [[ -n $err ]]; then finish "$id" "" "$err"; else finish "$id" "$note" ""; fi
+    ;;
+  install)
+    url="$2"
+    name="${3:-$2}"
+    [[ -n $url ]] || exit 2
+    err=""
+    if out=$(omarchy plugin add "$url" --enable --yes 2>&1); then
+      :
+    else
+      err=$(last_line "$out")
+      [[ -n $err ]] || err="omarchy plugin add failed"
+    fi
+    if [[ -n $err ]]; then finish "" "" "$err"; else finish "" "Installed $name" ""; fi
+    ;;
+  enable | disable)
+    id="$2"
+    [[ -n $id ]] || exit 2
+    err=""
+    if [[ $1 == enable ]]; then
+      out=$(omarchy-shell shell setPluginEnabled "$id" true 2>&1) || true
+      [[ $out == "ok" ]] || err="${out:-setPluginEnabled produced no output}"
+      note="Enabled $id"
+    else
+      err=$(clear_refs "$id") || true
+      note="Disabled $id"
+    fi
+    if [[ -n $err ]]; then finish "$id" "" "$err"; else finish "$id" "$note" ""; fi
+    ;;
   *)
-    echo "usage: plug-ctl.sh bind <keys> | unbind | bar on|off [section]" >&2
+    echo "usage: plug-ctl.sh bind <keys> | unbind | bar on|off [section] |" >&2
+    echo "       remove <id> | apply <id> | rollback <id> | install <url> [name] |" >&2
+    echo "       enable <id> | disable <id>" >&2
     exit 2
     ;;
 esac

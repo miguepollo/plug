@@ -110,9 +110,12 @@ version each applied update came from).
 | `~/.config/omarchy/shell.json` | only when you show or hide the bar icon, and only Plug's own `{"id": …}` entry |
 | a plugin's own checkout under `~/.config/omarchy/plugins/…` | standard git operations (`fetch`, fast-forward, and `reset` for a revert) when you update or roll back **that** plugin |
 
-**Commands it runs:** `omarchy-shell shell listPlugins` / `setPluginEnabled`
-(read the list; enable/disable on your click); `omarchy plugin add` / `remove`
-(install/uninstall on your click); `git` inside each plugin's checkout (read its
+**Commands it runs:** `omarchy-shell shell listPlugins` / `listShellConfig` /
+`setPluginEnabled` (read the list and your shell config; enable/disable on your
+click); `omarchy-restart-shell` (only after you apply an update or a restore —
+see below — and never while the screen is locked) with `omarchy-shell shell
+ping` / `summon` to bring Plug back afterwards with the result;
+`omarchy plugin add` / `remove` (install/uninstall on your click); `git` inside each plugin's checkout (read its
 state, fetch updates, show the diff, apply or revert); `hyprctl binds` (read
 active shortcuts) and `hyprctl reload` (after a hotkey change); `python3` (Plug's
 own engine); `bash` (Plug's own `plug-ctl.sh`); and the AI reviewer you chose —
@@ -124,8 +127,18 @@ the marketplace catalog on `raw.githubusercontent.com`; and, when you review an
 update with a cloud agent, that provider — never otherwise. A local-server
 reviewer stays on `localhost`.
 
-**Timers and background work:** none that outlives an action. Plug does its work
-when you open it or press a button.
+**Restarting the shell.** New plugin code sits unused until the shell restarts:
+the running shell keeps the copy it loaded at startup, and asking it to rescan
+its plugins only refreshes which plugins exist, not their code. So applying an
+update or a restore ends with a shell restart — otherwise you would be told the
+update was applied while the old version carried on running, which is exactly
+the trap Plug exists to close. Your windows and workspaces are untouched; the
+bar and the panels reload. Nothing else Plug does restarts anything.
+
+**Timers and background work:** none that runs on its own. The jobs you start —
+install, remove, update, restore, on/off — do outlive Plug's own window,
+because the reload that finishes them also closes it; each one ends by
+reopening Plug on the plugin it acted on and telling you what happened.
 
 Everything runs as your own user.
 

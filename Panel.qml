@@ -80,7 +80,15 @@ Item {
   }
 
   // ------------------------------------------------------------------ state
-  property string tab: "installed"          // installed | store | settings
+  property string tab: "installed"         // installed | store | settings
+  // The Store tab is the one view with a field to type into, so focus follows
+  // the tab: into the search box on the way in, back to the panel on the way
+  // out, where the arrow keys and shortcuts live.
+  onTabChanged: Qt.callLater(function() {
+    if (!root.opened) return
+    if (root.tab === "store" && typeof searchInput !== "undefined") searchInput.forceActiveFocus()
+    else keyCatcher.forceActiveFocus()
+  })
   property var installedRows: []            // joined listPlugins + engine aux
   property var auxById: ({})                // engine state.json plugins map
   property var catalogRows: []
@@ -117,6 +125,11 @@ Item {
   onUpdateCountChanged: PlugState.updateCount = root.updateCount
 
   // --------------------------------------------------------------- lifecycle
+  // A job that had to run outside the panel summons Plug back when it is done
+  // and hands over what happened: the row it acted on, and either a notice or
+  // the error the command printed. So the panel reappears on the plugin you
+  // touched with the result on screen, instead of just vanishing mid-action.
+  property string pendingHighlight: ""
   function open(payloadJson) {
     root.opened = true
     root.tab = "installed"
@@ -125,6 +138,16 @@ Item {
     root.reviewId = ""
     root.reviewData = null
     root.noticeText = ""
+    root.pendingHighlight = ""
+    root.busy = false; root.busyNote = ""
+    jobWatchdog.stop()
+    var payload = null
+    try { payload = JSON.parse(String(payloadJson || "")) } catch (e) { payload = null }
+    if (payload && typeof payload === "object") {
+      if (payload.highlight) root.pendingHighlight = String(payload.highlight)
+      if (payload.error) root.noticeText = String(payload.error).trim().split("\n").pop()
+      else if (payload.notice) root.noticeText = String(payload.notice)
+    }
     root.refreshAll()
     // Freshen the update flags in the background so they are current without
     // pressing the button — offline flags show immediately, the network check
@@ -224,6 +247,12 @@ Item {
     official.sort(function(x, y) { return x.name.toLowerCase() < y.name.toLowerCase() ? -1 : 1 })
     root.installedRows = out
     root.officialRows = official
+    if (root.pendingHighlight !== "") {
+      for (var h = 0; h < out.length; h++) {
+        if (out[h].id === root.pendingHighlight) { root.selectedIndex = h; break }
+      }
+      root.pendingHighlight = ""
+    }
     if (root.selectedIndex >= out.length) root.selectedIndex = Math.max(0, out.length - 1)
   }
 
@@ -292,47 +321,39 @@ Item {
   }
 
   // --------------------------------------------------------- enable/disable
-  // Exactly the operation `omarchy plugin enable/disable` performs, skipping
-  // the rescan that would tear this panel down. Detached so it outlives us if
-  // the toggle happens to unload the panel, then re-reads state.
-  function setEnabled(id, on) {
-    Quickshell.execDetached(["bash", "-c",
-      'omarchy-shell shell setPluginEnabled "$1" "$2" >/dev/null 2>&1',
-      "--", id, on ? "true" : "false"])
-    root.noticeText = (on ? "Enabled " : "Disabled ") + id
-    rerunTimer.restart()
+  // ------------------------------------------------------------- the jobs
+  //
+  // Installing, removing, updating, restoring and toggling all end with the
+  // shell reloading its plugins, and a reload unloads every open panel — this
+  // one included. Anything run from inside the panel is therefore killed at
+  // the exact moment its work lands, which is how a removal could delete a
+  // plugin and still report nothing at all. So every one of them is handed to
+  // plug-ctl.sh, detached: it outlives this window, finishes the job, and
+  // summons Plug back with the result. That also covers Plug updating itself.
+  function runJob(args, note) {
+    root.busy = true; root.busyNote = note
+    jobWatchdog.restart()
+    Quickshell.execDetached(["bash", root.pluginDir + "/plug-ctl.sh"].concat(args))
   }
-  Timer { id: rerunTimer; interval: 500; onTriggered: root.refreshAll() }
+  // A job that unloads the panel takes this state with it, and the summon that
+  // follows clears it. A job that does not — toggling a plugin with no window
+  // of its own — leaves the panel standing, so the wait cannot be left to hang
+  // on a runner that died without reporting.
+  Timer {
+    id: jobWatchdog
+    interval: 20000
+    onTriggered: { root.busy = false; root.busyNote = ""; root.refreshAll() }
+  }
+
+  function setEnabled(id, on) {
+    root.runJob([on ? "enable" : "disable", id], (on ? "Enabling " : "Disabling ") + "…")
+  }
 
   // ------------------------------------------------------------------ remove
   function askRemove(id) { root.confirmRemoveId = id }
-  // --yes is required: omarchy-plugin-remove asks for confirmation, and with no
-  // terminal behind us it refuses outright rather than prompting. We already
-  // asked ("sure?"), so answer for the user. Nothing is announced until the
-  // command has actually exited, and a failure says so with its own message.
-  property string removingId: ""
   function removeConfirmed(id) {
     root.confirmRemoveId = ""
-    root.busy = true; root.busyNote = "Removing…"
-    root.removingId = id
-    removeProc.command = ["omarchy", "plugin", "remove", id, "--yes"]
-    removeProc.running = false; removeProc.running = true
-  }
-  Process {
-    id: removeProc
-    onExited: (code) => {
-      root.busy = false; root.busyNote = ""
-      if (code === 0) {
-        root.noticeText = "Removed " + root.removingId
-      } else {
-        var err = (removeProc.stderr.text || "").trim().split("\n").pop()
-        root.noticeText = "Could not remove " + root.removingId + (err ? " — " + err : "")
-      }
-      root.removingId = ""
-      root.refreshAll()
-    }
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
+    root.runJob(["remove", id], "Removing…")
   }
 
   // ------------------------------------------------------------------ update
@@ -366,16 +387,8 @@ Item {
   function approveUpdate() {
     if (!root.reviewId) return
     var id = root.reviewId
-    root.busy = true; root.busyNote = "Applying update…"
-    applyProc.command = ["python3", root.pluginDir + "/plugd.py", "apply", id]
-    applyProc.running = false; applyProc.running = true
     root.reviewId = ""; root.reviewData = null
-    root.noticeText = "Updated " + id
-  }
-  Process {
-    id: applyProc
-    onExited: { root.busy = false; root.busyNote = ""; root.refreshAll() }
-    stdout: StdioCollector { waitForEnd: true }
+    root.runJob(["apply", id], "Applying update…")
   }
 
   function cancelReview() { root.reviewId = ""; root.reviewData = null; root.reviewRunning = false }
@@ -383,15 +396,7 @@ Item {
   // Undo the last applied update — the version to return to was recorded when
   // the update was applied.
   function revert(id) {
-    root.busy = true; root.busyNote = "Reverting…"
-    revertProc.command = ["python3", root.pluginDir + "/plugd.py", "rollback", id]
-    revertProc.running = false; revertProc.running = true
-    root.noticeText = "Reverted " + id + " to its previous version"
-  }
-  Process {
-    id: revertProc
-    onExited: { root.busy = false; root.busyNote = ""; root.refreshAll() }
-    stdout: StdioCollector { waitForEnd: true }
+    root.runJob(["rollback", id], "Restoring…")
   }
 
   // ------------------------------------------------------------------ store
@@ -455,28 +460,7 @@ Item {
 
   function installFromStore(c) {
     if (!c.repo) return
-    root.busy = true; root.busyNote = "Installing " + c.name + "…"
-    installProc.command = ["omarchy", "plugin", "add", c.repo + ".git", "--enable", "--yes"]
-    installProc.running = false; installProc.running = true
-    root.installingName = c.name
-    root.noticeText = "Installing " + c.name
-  }
-  property string installingName: ""
-  Process {
-    id: installProc
-    onExited: (code) => {
-      root.busy = false; root.busyNote = ""
-      if (code === 0) {
-        root.noticeText = "Installed " + root.installingName
-      } else {
-        var err = (installProc.stderr.text || "").trim().split("\n").pop()
-        root.noticeText = "Could not install " + root.installingName + (err ? " — " + err : "")
-      }
-      root.installingName = ""
-      root.refreshAll()
-    }
-    stdout: StdioCollector { waitForEnd: true }
-    stderr: StdioCollector { waitForEnd: true }
+    root.runJob(["install", c.repo + ".git", c.name], "Installing " + c.name + "…")
   }
 
   // ------------------------------------------------------------------ settings
@@ -644,9 +628,10 @@ Item {
           root.selectedIndex = 0; e.accepted = true; return
         }
 
-        // The panel holds keyboard focus itself, so the Store search is a
-        // filter buffer built from keystrokes rather than a focused field —
-        // just type on the Store tab. Backspace edits it.
+        // Typing on the Store tab searches even when the field was never
+        // clicked — the panel takes the keystroke and feeds the same buffer.
+        // Once the field has focus it handles its own keys and this never
+        // runs.
         if (root.tab === "store") {
           if (e.key === Qt.Key_Backspace) {
             root.storeQuery = root.storeQuery.slice(0, -1); e.accepted = true; return
@@ -819,6 +804,12 @@ Item {
                       rowData: modelData
                       confirming: root.confirmRemoveId === modelData.id
                       selected: index === root.selectedIndex
+                      selectable: true
+                      onRowClicked: {
+                        root.selectedIndex = index
+                        root.confirmRemoveId = ""
+                        keyCatcher.forceActiveFocus()
+                      }
                     }
                   }
                 }
@@ -876,13 +867,28 @@ Item {
             anchors.fill: parent
             spacing: Style.space(8)
 
+            // A real field, not a picture of one. Typing on the Store tab
+            // still works without touching it, but it takes a click, shows a
+            // caret, and accepts a paste — which is what a box with a
+            // magnifying glass in it promises.
             Rectangle {
+              id: searchBox
               width: parent.width
               height: Style.space(32)
               radius: root.cornerRadius
-              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
-              border.color: root.hairline
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b,
+                             searchInput.activeFocus ? 0.10 : 0.06)
+              border.color: searchInput.activeFocus ? root.accent : root.hairline
               border.width: 1
+
+              // Anywhere in the box puts the caret in the text, including the
+              // empty space to the right of it.
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.IBeamCursor
+                onClicked: searchInput.forceActiveFocus()
+              }
+
               Row {
                 anchors.fill: parent
                 anchors.leftMargin: Style.space(10)
@@ -894,17 +900,73 @@ Item {
                   anchors.verticalCenter: parent.verticalCenter
                   font.pixelSize: Style.font.body
                 }
-                Text {
-                  width: parent.width - Style.space(40)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: root.storeQuery !== "" ? root.storeQuery
-                      : "Type to search " + (root.communityCount || "the") + " community plugins…"
-                  textFormat: Text.PlainText
-                  color: root.storeQuery !== "" ? root.foreground : root.fainter
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  elide: Text.ElideRight
-                  clip: true
+                Item {
+                  width: parent.width - Style.space(40) - (clearBtn.visible ? Style.space(24) : 0)
+                  height: parent.height
+                  TextInput {
+                    id: searchInput
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width
+                    text: root.storeQuery
+                    onTextChanged: if (text !== root.storeQuery) root.storeQuery = text
+                    color: root.foreground
+                    selectionColor: root.selBg
+                    selectedTextColor: root.selText
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    clip: true
+                    selectByMouse: true
+                    activeFocusOnPress: true
+                    // A filter box, so a pasted wall of text is capped rather
+                    // than carried into every search comparison.
+                    maximumLength: 128
+                    cursorVisible: activeFocus
+                    // Escape and Tab still belong to the panel, so they are
+                    // handed back rather than swallowed by the field.
+                    Keys.onPressed: function(e) {
+                      if (e.key === Qt.Key_Escape) {
+                        if (root.storeQuery !== "") root.storeQuery = ""
+                        else root.close()
+                        e.accepted = true
+                      } else if (e.key === Qt.Key_Tab) {
+                        root.tab = "settings"
+                        root.selectedIndex = 0
+                        keyCatcher.forceActiveFocus()
+                        e.accepted = true
+                      }
+                    }
+                  }
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width
+                    visible: root.storeQuery === ""
+                    text: "Search " + (root.communityCount || "the") + " community plugins…"
+                    textFormat: Text.PlainText
+                    color: root.fainter
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+                }
+                // Clear, for people who reach for the mouse rather than Escape.
+                Item {
+                  id: clearBtn
+                  visible: root.storeQuery !== ""
+                  width: Style.space(20); height: parent.height
+                  Text {
+                    anchors.centerIn: parent
+                    text: "✕"
+                    textFormat: Text.PlainText
+                    color: clearHover.containsMouse ? root.foreground : root.fainter
+                    font.pixelSize: Style.font.caption
+                  }
+                  MouseArea {
+                    id: clearHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: { root.storeQuery = ""; searchInput.forceActiveFocus() }
+                  }
                 }
               }
             }
@@ -1081,6 +1143,12 @@ Item {
     property var rowData: null
     property bool confirming: false
     property bool selected: false
+    // Community rows are the ones the cursor moves over, so they answer to a
+    // click as well as to the arrow keys — clicking a row's name puts the
+    // highlight on it, and Enter then acts on it. Official rows have no
+    // cursor to move, so they do not pretend to be clickable.
+    property bool selectable: false
+    signal rowClicked()
     height: Style.space(48)
     radius: root.cornerRadius
     color: selected ? root.selBg
@@ -1091,7 +1159,13 @@ Item {
       : rowData && rowData.updateAvailable ? Qt.rgba(root.okColor.r, root.okColor.g, root.okColor.b, 0.5)
       : root.hairline
     border.width: selected ? Math.max(1, Style.space(1)) : 1
-    MouseArea { id: rowHover; anchors.fill: parent; hoverEnabled: true }
+    MouseArea {
+      id: rowHover
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: parent.selectable ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onClicked: if (parent.selectable) parent.rowClicked()
+    }
 
     // controls on the right; text fills the space that is left. The on/off
     // switch is last so it sits at the same position on every row — official
