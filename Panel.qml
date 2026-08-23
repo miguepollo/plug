@@ -275,10 +275,13 @@ Item {
     root.busy = true; root.busyNote = "Checking for updates…"
     checkProc.running = false; checkProc.running = true
   }
+  // Set once a network check has actually completed, so "no updates" is only
+  // shown after we have looked — not before the first check on open.
+  property bool updatesChecked: false
   Process {
     id: checkProc
     command: ["python3", root.pluginDir + "/plugd.py", "check-updates"]
-    onExited: { root.busy = false; root.busyNote = ""; root.readState() }
+    onExited: { root.busy = false; root.busyNote = ""; root.updatesChecked = true; root.readState() }
     stdout: StdioCollector { waitForEnd: true }
   }
 
@@ -738,6 +741,20 @@ Item {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 anchors.verticalCenter: parent.verticalCenter
+              }
+              // A plain-language status once a check has run: either the count
+              // (also badged in the header) or an explicit all-clear.
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.updatesChecked && !(root.busy && root.busyNote.indexOf("update") >= 0)
+                text: root.updateCount > 0
+                    ? (root.updateCount + " update" + (root.updateCount === 1 ? "" : "s") + " available")
+                    : "✓ No updates available"
+                textFormat: Text.PlainText
+                color: root.updateCount > 0 ? root.warnColor : root.okColor
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
               }
               Item { width: Style.space(1); height: 1 }
               PlugButton {
