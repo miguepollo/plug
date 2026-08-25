@@ -173,7 +173,8 @@ Item {
   }
 
   // Settings, loaded from the engine's settings.json.
-  property var settings: ({ reviewAgent: "claude", reviewModel: "sonnet", autoCheck: true })
+  property var settings: ({ reviewAgent: "claude", reviewModel: "sonnet", autoCheck: true,
+                            autoCatalog: true })
   property var availableAgents: []
   property bool settingsLoaded: false
 
@@ -601,18 +602,76 @@ Item {
   }
 
   // ------------------------------------------------------------------ store
+  //
+  // Reading the saved catalog and fetching a new one are deliberately two
+  // different things. Startup reads what is on disk and touches the network
+  // not at all — Plug must not reach out because the shell started. A fetch
+  // happens only when you open the Store, which is the trigger that already
+  // fetched, and only if what is saved has aged out; or when you ask for one
+  // by hand. There is no timer: nothing here fetches while you are not
+  // looking at it.
+  readonly property int catalogMaxAgeMs: 6 * 60 * 60 * 1000
+  property string catalogFetchedAt: ""
+  property bool catalogRefreshing: false
+  property bool catalogQuiet: false
+  // A function rather than a binding: this answer depends on the clock, and a
+  // binding would cache the first answer for as long as the panel stayed open.
+  function catalogIsStale() {
+    if (!root.catalogLoaded) return true
+    var t = Date.parse(root.catalogFetchedAt)
+    if (isNaN(t)) return true
+    return (Date.now() - t) > root.catalogMaxAgeMs
+  }
   function loadCatalog() {
     catalogReader.running = false; catalogReader.running = true
   }
-  function refreshCatalog() {
-    root.busy = true; root.busyNote = "Fetching catalog…"
+  function refreshCatalog(quiet) {
+    if (root.catalogRefreshing) return
+    root.catalogRefreshing = true
+    root.catalogQuiet = (quiet === true)
+    // The shared busy flag drives the footer for things you pressed. A
+    // refresh happening behind the rows you are already reading must not
+    // borrow it, or Plug looks like it has hung on something you asked for.
+    if (!root.catalogQuiet) { root.busy = true; root.busyNote = "Fetching catalog…" }
     catalogFetch.running = false; catalogFetch.running = true
+  }
+  // Opening the Store: fetch if there is nothing to show, otherwise refresh
+  // quietly underneath the rows already on screen.
+  function openStore() {
+    root.tab = "store"
+    if (!root.catalogLoaded) root.refreshCatalog(false)
+    else if (root.catalogIsStale() && root.settings.autoCatalog !== false) root.refreshCatalog(true)
   }
   Process {
     id: catalogFetch
     command: ["python3", root.pluginDir + "/plugd.py", "catalog"]
-    onExited: { root.busy = false; root.busyNote = ""; root.loadCatalog() }
-    stdout: StdioCollector { waitForEnd: true }
+    onExited: {
+      root.catalogRefreshing = false
+      root.busy = false; root.busyNote = ""
+      // The engine writes the saved copy only on success, so a failed fetch
+      // leaves the Store working on what it already had. Say that, rather
+      // than leaving a stale list looking current.
+      // Unreachable, too large and unreadable are three different problems
+      // with three different answers, and the engine already knows which one
+      // it hit. Flattening them into one line about the network sends you
+      // looking in the wrong place.
+      var ok = false, why = ""
+      try {
+        var d = JSON.parse(catalogFetchOut.text)
+        ok = d.ok === true
+        if (!ok && typeof d.error === "string")
+          why = d.error.replace(/\s+/g, " ").trim().slice(0, 160)
+      } catch (e) {}
+      if (!ok)
+        // "showing the saved copy" is only true when there is one. On a first
+        // run there is nothing to fall back to, and the Store says so itself.
+        root.noticeText = "Catalog not updated: "
+          + (why === "" ? "no reason given" : why)
+          + (root.catalogLoaded ? " — showing the saved copy" : "")
+      else if (!root.catalogQuiet) root.noticeText = "Catalog updated"
+      root.loadCatalog()
+    }
+    stdout: StdioCollector { id: catalogFetchOut; waitForEnd: true }
   }
   readonly property int catalogCeiling: 8 * 1024 * 1024
   Process {
@@ -624,7 +683,11 @@ Item {
       onStreamFinished: {
         try {
           var d = JSON.parse(text)
-          if (d && Array.isArray(d.plugins)) { root.catalogRows = d.plugins; root.catalogLoaded = true }
+          if (d && Array.isArray(d.plugins)) {
+            root.catalogRows = d.plugins
+            root.catalogFetchedAt = (typeof d.fetchedAt === "string") ? d.fetchedAt : ""
+            root.catalogLoaded = true
+          }
         } catch (e) {}
       }
     }
@@ -650,16 +713,9 @@ Item {
       }
       if (c.official) off.push(c)
       else comm.push(c)
-      if (comm.length + off.length >= 300) break
     }
     return comm.concat(off)
   }
-  readonly property int communityCount: {
-    var n = 0
-    for (var i = 0; i < root.catalogRows.length; i++) if (!root.catalogRows[i].official) n++
-    return n
-  }
-
   // Open a catalog entry's own repository page. The catalog is fetched from
   // the internet, so its addresses are data: each one is checked against a
   // plain https shape before it is handed over, and it is passed as an
@@ -881,7 +937,8 @@ Item {
           e.accepted = true; return
         }
         if (e.key === Qt.Key_Tab) {
-          root.tab = root.tab === "installed" ? "store" : (root.tab === "store" ? "settings" : "installed")
+          if (root.tab === "installed") root.openStore()
+          else root.tab = (root.tab === "store" ? "settings" : "installed")
           root.selectedIndex = 0; e.accepted = true; return
         }
 
@@ -981,7 +1038,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
             TabButton { label: "Installed"; active: root.tab === "installed"; onPickedT: root.tab = "installed" }
-            TabButton { label: "Store"; active: root.tab === "store"; onPickedT: { root.tab = "store"; if (!root.catalogLoaded) root.refreshCatalog() } }
+            TabButton { label: "Store"; active: root.tab === "store"; onPickedT: root.openStore() }
             TabButton { label: "Settings"; active: root.tab === "settings"; onPickedT: root.tab = "settings" }
           }
         }
@@ -1203,7 +1260,8 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Item {
-                  width: parent.width - Style.space(40) - (clearBtn.visible ? Style.space(24) : 0)
+                  width: parent.width - Style.space(40) - refreshBtn.width
+                         - (clearBtn.visible ? Style.space(24) : 0)
                   height: parent.height
                   TextInput {
                     id: searchInput
@@ -1242,12 +1300,42 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     width: parent.width
                     visible: root.storeQuery === ""
-                    text: "Search " + (root.communityCount || "the") + " community plugins…"
+                    text: "Search community plugins…"
                     textFormat: Text.PlainText
                     color: root.fainter
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     elide: Text.ElideRight
+                  }
+                }
+                // Fetch the catalog now. The Store already refreshes itself
+                // when what is saved has aged out; this is for when you know
+                // something was listed a minute ago.
+                Item {
+                  id: refreshBtn
+                  // The word, not a symbol: a circular arrow is a guess until
+                  // you have pressed it once. The label never changes width
+                  // while it works, so the box does not shift under the
+                  // pointer — the footer carries the progress instead.
+                  width: refreshLabel.implicitWidth + Style.space(6)
+                  height: parent.height
+                  Text {
+                    id: refreshLabel
+                    anchors.centerIn: parent
+                    text: "Refresh"
+                    textFormat: Text.PlainText
+                    color: root.catalogRefreshing ? root.accent
+                         : refreshHover.containsMouse ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    id: refreshHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    enabled: !root.catalogRefreshing
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.refreshCatalog(false)
                   }
                 }
                 // Clear, for people who reach for the mouse rather than Escape.
@@ -1273,31 +1361,34 @@ Item {
               }
             }
 
-            Flickable {
+            // A list that builds the rows it is showing, not the whole
+            // catalog. The old column made every row a live object up front,
+            // which is why it had to stop at 300 — a bound on what could be
+            // drawn, sitting on data that was already bounded when it was
+            // fetched and read. Building on demand is the stricter bound of
+            // the two: what exists is what fits on screen, whether the
+            // catalog holds a thousand plugins or ten thousand. Rows are a
+            // fixed height, so the scrollbar needs no guesswork.
+            Item {
               width: parent.width
               height: parent.height - Style.space(40)
-              contentHeight: storeCol.height
-              clip: true
-              Column {
-                id: storeCol
-                width: parent.width
+              ListView {
+                id: storeList
+                anchors.fill: parent
+                clip: true
+                model: root.storeFiltered
                 spacing: Style.space(6)
-                Repeater {
-                  model: root.storeFiltered
-                  delegate: StoreRow { width: storeCol.width; cData: modelData }
-                }
-                Item {
-                  visible: !root.catalogLoaded
-                  width: parent.width; height: Style.space(60)
-                  Text {
-                    anchors.centerIn: parent
-                    text: root.busy ? "Fetching catalog…" : "Catalog not loaded."
-                    textFormat: Text.PlainText
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                  }
-                }
+                boundsBehavior: Flickable.StopAtBounds
+                delegate: StoreRow { width: storeList.width; cData: modelData }
+              }
+              Text {
+                anchors.centerIn: parent
+                visible: !root.catalogLoaded
+                text: root.busy ? "Fetching catalog…" : "Catalog not loaded."
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
               }
             }
           }

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -92,10 +93,22 @@ DEFAULT_SETTINGS = {"reviewAgent": "claude", "reviewModel": "sonnet",
 CATALOG_URL = ("https://raw.githubusercontent.com/HANCORE-linux/"
                "omarchy-plugin-marketplace/main/site/catalog.json")
 
+# Hitting the catalog ceiling is not something a user can fix from here, so
+# the message says what it actually takes: a build of Plug carrying a bigger
+# number. Silence, or a message about the network, would send them looking in
+# the wrong place for as long as they cared to look.
+def _too_big():
+    return ("the catalog is bigger than this version of Plug accepts (%d MB) "
+            "— it needs a newer Plug" % (MAX_REGISTRY_BYTES // (1024 * 1024)))
+
 # Ceilings. A plugin's own files are small; a repository that answers with
 # something orders of magnitude larger is not a plugin, and this can run on a
 # timer, so nothing over the ceiling is ever held.
-MAX_REGISTRY_BYTES = 8 * 1024 * 1024
+# The marketplace catalog is the one file here that grows on its own: it was
+# ~2 MB when this was first set and passed 2.8 MB inside a fortnight. The
+# protection is that a single known address is bounded at all, not the number,
+# so the number is set well clear of that growth rather than at the edge of it.
+MAX_REGISTRY_BYTES = 32 * 1024 * 1024
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_DIFF_BYTES = 512 * 1024
@@ -543,10 +556,26 @@ def fetch_catalog_raw():
     req = urllib.request.Request(CATALOG_URL,
                                  headers={"User-Agent": "plug-omarchy-plugin/0.1"})
     with urllib.request.urlopen(req, timeout=30) as r:
+        # urllib follows redirects on its own, so the address that answered is
+        # not necessarily the one asked for. Check what actually replied: a
+        # redirect must not be able to walk this off https.
+        if not str(getattr(r, "url", "") or CATALOG_URL).startswith("https://"):
+            raise ValueError("a redirect took the catalog off https")
+        # What the server says it is about to send. It can be missing and it
+        # can be a lie, so the capped read below is still what enforces the
+        # ceiling; this only avoids pulling down megabytes of something that
+        # has already announced itself as too large.
+        declared = r.headers.get("Content-Length")
+        if declared and declared.strip().isdigit() \
+                and int(declared) > MAX_REGISTRY_BYTES:
+            raise ValueError(_too_big())
         raw = r.read(MAX_REGISTRY_BYTES + 1)
     if len(raw) > MAX_REGISTRY_BYTES:
-        raise ValueError("catalog larger than %d bytes" % MAX_REGISTRY_BYTES)
-    return json.loads(raw.decode("utf-8", "replace"))
+        raise ValueError(_too_big())
+    try:
+        return json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        raise ValueError("the catalog did not come back as readable data")
 
 
 def build_catalog():
@@ -1437,8 +1466,14 @@ def main():
         try:
             c = build_catalog()
             print(json.dumps({"ok": True, "count": c["count"]}))
+        except urllib.error.URLError as e:
+            print(json.dumps({"ok": False, "error":
+                              "could not reach the marketplace (%s)"
+                              % str(getattr(e, "reason", e))[:120]}))
         except Exception as e:
-            print(json.dumps({"ok": False, "error": str(e)}))
+            # Part of this text can come from whatever answered the request,
+            # so it is capped here and rendered as plain text at the panel.
+            print(json.dumps({"ok": False, "error": str(e)[:200]}))
     elif args.cmd == "agents":
         print(json.dumps(available_agents()))
     elif args.cmd == "scan":

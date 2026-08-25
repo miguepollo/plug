@@ -141,6 +141,14 @@ the marketplace catalog on `raw.githubusercontent.com`; and, when you review an
 update with a cloud agent, that provider — never otherwise. A local-server
 reviewer stays on `localhost`.
 
+**When the catalog is fetched.** Starting the shell never fetches it — Plug
+reads the saved copy from disk and stops there. A fetch happens when you open
+the Store and the saved copy is more than six hours old, or when you press the
+refresh control beside the search box. There is no timer. Set `autoCatalog` to
+`false` in `settings.json` to leave it to the refresh control alone. A fetch
+that fails changes nothing: the saved copy is written only on success, so the
+Store keeps working offline and says which copy you are looking at.
+
 **Restarting the shell.** Applying an update or a restore ends with a shell
 restart, because that is what makes changed plugin code take effect: the running
 shell keeps the copy it loaded at startup, and a plugin rescan refreshes only
@@ -181,6 +189,28 @@ shell process that stays up for days, so all of it is treated as data:
 - A plugin you ask Plug to check before installing is cloned shallow into a
   throwaway directory, read, and deleted — whether the check succeeds or not.
   Nothing in it is executed at any point.
+
+## Maintenance
+
+**If Plug says the catalog is bigger than it accepts.** The marketplace catalog
+is one file that grows as plugins are listed, and Plug refuses one over a set
+size so a runaway download cannot be held in memory. That size is a single line
+near the top of `plugd.py`:
+
+```
+MAX_REGISTRY_BYTES = 32 * 1024 * 1024
+```
+
+Change `32` to `64` and save. Nothing needs restarting — the engine runs as a
+fresh process for every fetch, so your next refresh in the Store uses the new
+number. Saving a file inside the plugin folder makes Omarchy reload its plugins,
+so the bar blinks once; that is all that happens.
+
+Two things worth knowing. Updating Plug replaces `plugd.py`, so your edit goes
+with it — a released version raising the number is the durable fix, and this is
+the thing to do in the meantime. And the number is a ceiling on what is read
+into memory at once, so raise it a step at a time rather than to something
+enormous.
 
 ## Dependencies
 
