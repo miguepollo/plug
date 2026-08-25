@@ -141,11 +141,23 @@ def ensure_state_dir():
         raise RuntimeError("%s is not owner-only; refusing to write" % STATE_DIR)
 
 
-def read_capped(path, ceiling):
-    """Read a file to a ceiling, following a symlink only to a real regular
-    file, non-blocking so a planted FIFO cannot hang the read."""
-    real = os.path.realpath(path)
-    fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK)
+def read_capped(path, ceiling, follow=False):
+    """Read a file to a ceiling, non-blocking so a planted FIFO cannot hang.
+
+    Two kinds of file reach this, and they want opposite answers to a symlink.
+    Files Plug owns — its state, its settings, its bookkeeping — live in a
+    directory nobody else has any business linking through, so a link at one
+    of those names is not a dotfiles manager being helpful, it is something
+    redirecting a read: refuse it outright with O_NOFOLLOW. Files Plug merely
+    inspects, or that the user manages themselves, are legitimately symlinked
+    — shell.json into a chezmoi repository, a file inside somebody's plugin
+    checkout — so those resolve first and are then checked to be a real
+    regular file. O_NOFOLLOW only refuses a link as the last component, so a
+    plugin directory that is itself a symlink still reads fine either way.
+    """
+    real = os.path.realpath(path) if follow else path
+    flags = os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW)
+    fd = os.open(real, flags)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("%s is not a regular file" % path)
@@ -160,9 +172,9 @@ def read_capped(path, ceiling):
     return raw
 
 
-def read_json(path, ceiling, fallback):
+def read_json(path, ceiling, fallback, follow=False):
     try:
-        return json.loads(read_capped(path, ceiling).decode("utf-8", "replace"))
+        return json.loads(read_capped(path, ceiling, follow).decode("utf-8", "replace"))
     except (OSError, ValueError):
         return fallback
 
@@ -452,7 +464,7 @@ def scan_files(root, only_files=None):
         try:
             if os.path.islink(path) or not os.path.isfile(path):
                 continue
-            raw = read_capped(path, MAX_SOURCE_BYTES)
+            raw = read_capped(path, MAX_SOURCE_BYTES, follow=True)
         except OSError:
             continue
         count += 1
@@ -588,7 +600,7 @@ def build_catalog():
 # --------------------------------------------------- installed inventory
 
 def read_manifest(dirpath):
-    m = read_json(os.path.join(dirpath, "manifest.json"), 256 * 1024, {})
+    m = read_json(os.path.join(dirpath, "manifest.json"), 256 * 1024, {}, follow=True)
     return m if isinstance(m, dict) else {}
 
 
@@ -693,8 +705,9 @@ def shell_placements():
     still running perfectly well. Reading the config directly is the only way
     to tell "switched off" from "loaded, icon hidden"."""
     out = {}
+    # The user's own file, and a dotfiles manager legitimately symlinks it.
     d = read_json(os.path.join(HOME, ".config", "omarchy", "shell.json"),
-                  4 * 1024 * 1024, {})
+                  4 * 1024 * 1024, {}, follow=True)
     if not isinstance(d, dict):
         return out
 
@@ -1258,7 +1271,7 @@ def inspect_repo(url):
         code, err = clone_bounded(tmp, url, dest)
         if code != 0:
             return {"error": (err or "could not clone the repository").strip().split("\n")[-1]}
-        manifest = read_json(os.path.join(dest, "manifest.json"), 256 * 1024, {})
+        manifest = read_json(os.path.join(dest, "manifest.json"), 256 * 1024, {}, follow=True)
         if not isinstance(manifest, dict):
             manifest = {}
         name = manifest.get("name") or url.rstrip("/").split("/")[-1]
