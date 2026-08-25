@@ -59,23 +59,28 @@ resolve_bind_file() {
   printf '%s' "$real"
 }
 
+# Both of these read the file the write will land on — the resolved one —
+# rather than the name it was reached by. Inspecting through the link and
+# writing to its target leaves a window in which the link can be swung at
+# another readable file between the two, and its contents would then be
+# copied into bindings.lua.
 check_markers() {
-  local opens closes o c
-  opens=$(grep -c -- ">>> plug hotkey" "$BIND_FILE" || true)
-  closes=$(grep -c -- "<<< plug hotkey" "$BIND_FILE" || true)
+  local file="$1" opens closes o c
+  opens=$(grep -c -- ">>> plug hotkey" "$file" || true)
+  closes=$(grep -c -- "<<< plug hotkey" "$file" || true)
   if (( opens != closes )); then
-    echo "plug-ctl: refusing to edit $BIND_FILE — its hotkey block is not a matched pair ($opens opening, $closes closing)" >&2
+    echo "plug-ctl: refusing to edit $file — its hotkey block is not a matched pair ($opens opening, $closes closing)" >&2
     return 1
   fi
   if (( opens > 1 )); then
-    echo "plug-ctl: refusing to edit $BIND_FILE — $opens hotkey blocks, expected at most one" >&2
+    echo "plug-ctl: refusing to edit $file — $opens hotkey blocks, expected at most one" >&2
     return 1
   fi
   if (( opens == 1 )); then
-    o=$(grep -n -- ">>> plug hotkey" "$BIND_FILE" | head -1 | cut -d: -f1)
-    c=$(grep -n -- "<<< plug hotkey" "$BIND_FILE" | head -1 | cut -d: -f1)
+    o=$(grep -n -- ">>> plug hotkey" "$file" | head -1 | cut -d: -f1)
+    c=$(grep -n -- "<<< plug hotkey" "$file" | head -1 | cut -d: -f1)
     if (( c < o )); then
-      echo "plug-ctl: refusing to edit $BIND_FILE — its hotkey block closes before it opens" >&2
+      echo "plug-ctl: refusing to edit $file — its hotkey block closes before it opens" >&2
       return 1
     fi
   fi
@@ -83,11 +88,22 @@ check_markers() {
 }
 
 strip_block() {
+  local file="$1"
+  # The block is written with a blank line above it, for legibility. That
+  # blank is ours, so it has to come out with the block — stripping only the
+  # marked lines left one behind on every re-bind, and three hotkey changes
+  # meant three orphan blank lines in a file this plugin promises to leave
+  # otherwise untouched. Blank lines the user has of their own are held and
+  # re-emitted; exactly one, immediately above the opening marker, is dropped.
   awk '
-    index($0, ">>> plug hotkey") { skip = 1; next }
+    function flush(  i) { for (i = 0; i < pending; i++) print ""; pending = 0 }
+    index($0, ">>> plug hotkey") { if (pending > 0) pending--; flush(); skip = 1; next }
     index($0, "<<< plug hotkey") { skip = 0; next }
-    !skip { print }
-  ' "$BIND_FILE"
+    skip { next }
+    $0 == "" { pending++; next }
+    { flush(); print }
+    END { flush() }
+  ' "$file"
 }
 
 # ---------------------------------------------------------------- job helpers
@@ -225,8 +241,8 @@ if ! [[ $key =~ $KEY_SHAPE ]]; then
     REAL_BIND=$(resolve_bind_file) || exit 1
     tmp=$(mktemp "$REAL_BIND.XXXXXXXX")
     trap 'rm -f "$tmp"' EXIT
-    check_markers || exit 1
-    strip_block > "$tmp"
+    check_markers "$REAL_BIND" || exit 1
+    strip_block "$REAL_BIND" > "$tmp"
     {
       echo ""
       echo "$MARK_IN"
@@ -243,8 +259,8 @@ if ! [[ $key =~ $KEY_SHAPE ]]; then
     REAL_BIND=$(resolve_bind_file) || exit 1
     tmp=$(mktemp "$REAL_BIND.XXXXXXXX")
     trap 'rm -f "$tmp"' EXIT
-    check_markers || exit 1
-    strip_block > "$tmp"
+    check_markers "$REAL_BIND" || exit 1
+    strip_block "$REAL_BIND" > "$tmp"
     chmod --reference="$REAL_BIND" "$tmp" 2>/dev/null || chmod 644 "$tmp"
     mv -f "$tmp" "$REAL_BIND"
     trap - EXIT
@@ -256,10 +272,18 @@ import json, os, stat, sys, tempfile
 state = sys.argv[1]
 sec = sys.argv[2] if sys.argv[2] in ("left", "center", "right") else "right"
 ID = "io.github.weedwhitesandwine.plug"
-p = os.path.expanduser("~/.config/omarchy/shell.json")
+link = os.path.expanduser("~/.config/omarchy/shell.json")
 # shell.json belongs to the user, not to this plugin, and it is read back
 # before it is rewritten. The open refuses symlinks and non-regular files, so
 # a planted link cannot redirect the read and a FIFO cannot block it forever.
+#
+# A dotfiles manager (stow, chezmoi) puts a symlink at this name pointing into
+# its own repository, and refusing every symlink meant those users could not
+# turn the bar icon on at all. Resolve the name and work on the file it really
+# is: the link survives, the repository stays the thing that owns the content,
+# and a link pointing at something that is not the user's own is still
+# refused.
+p = os.path.realpath(link)
 MAX_SHELL_JSON = 4 * 1024 * 1024
 
 
@@ -270,6 +294,14 @@ def fail(why):
     sys.stderr.write(why + "\n")
     raise SystemExit(1)
 
+
+home_cfg = os.path.dirname(p)
+try:
+    st = os.stat(home_cfg)
+    if st.st_uid != os.getuid() or (st.st_mode & 0o022):
+        fail("%s is not yours, or is writable by others" % home_cfg)
+except OSError as e:
+    fail("could not check %s: %s" % (home_cfg, e))
 
 try:
     fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -289,37 +321,38 @@ except SystemExit:
     raise
 except Exception as e:
     fail("could not read %s: %s" % (p, e))
+if os.stat(p).st_uid != os.getuid():
+    fail("%s is not yours" % p)
 if not isinstance(d, dict):
     fail("%s is not a JSON object" % p)
 def eid(w): return w.get("id") if isinstance(w, dict) else w
-if not isinstance(d.get("bar"), dict):
-    d["bar"] = {}
-bar = d["bar"]
-if not isinstance(bar.get("layout"), dict):
-    bar["layout"] = {}
-lay = bar["layout"]
-for s in ("left", "center", "right"):
-    if not isinstance(lay.get(s), list):
-        lay[s] = []
-for s in lay:
-    if isinstance(lay[s], list):
-        lay[s] = [w for w in lay[s] if eid(w) != ID]
-if not isinstance(d.get("plugins"), list):
-    d["plugins"] = []
-d["plugins"] = [w for w in d["plugins"] if eid(w) != ID]
+# Its own entry, and nothing else: turning the icon on adds the one section it
+# goes into, turning it off adds the plugins list it goes into, and no other
+# key is invented on the way past.
+bar = d.get("bar")
+lay = bar.get("layout") if isinstance(bar, dict) else None
+if isinstance(lay, dict):
+    for s in lay:
+        if isinstance(lay[s], list):
+            lay[s] = [w for w in lay[s] if eid(w) != ID]
+if isinstance(d.get("plugins"), list):
+    d["plugins"] = [w for w in d["plugins"] if eid(w) != ID]
+
 if state == "on":
-    lay[sec].append({"id": ID})
+    if not isinstance(d.get("bar"), dict):
+        d["bar"] = {}
+    if not isinstance(d["bar"].get("layout"), dict):
+        d["bar"]["layout"] = {}
+    if not isinstance(d["bar"]["layout"].get(sec), list):
+        d["bar"]["layout"][sec] = []
+    d["bar"]["layout"][sec].append({"id": ID})
 else:
+    if not isinstance(d.get("plugins"), list):
+        d["plugins"] = []
     d["plugins"].append({"id": ID})
-# Staged under an unpredictable name created exclusively by mkstemp in a
-# directory verified owner-only, then renamed over the destination in one step.
-home_cfg = os.path.dirname(p)
-try:
-    st = os.stat(home_cfg)
-    if st.st_uid != os.getuid() or (st.st_mode & 0o022):
-        fail("%s is not owner-only" % home_cfg)
-except OSError as e:
-    fail("could not check %s: %s" % (home_cfg, e))
+# Staged under an unpredictable name created exclusively by mkstemp in the
+# directory verified owner-only above, then renamed over the destination in
+# one step.
 fd, tmp = tempfile.mkstemp(prefix=".shell.json.", suffix=".tmp", dir=home_cfg)
 try:
     with os.fdopen(fd, "w") as f:
@@ -367,29 +400,7 @@ PY
     # its restore bookkeeping go with it, rather than sitting in the state
     # directory for the rest of the machine's life.
     if [[ -z $err ]]; then
-      python3 - "$id" <<'CLEANUP' || true
-import json, os, re, sys
-pid = sys.argv[1]
-state = os.path.join(os.environ.get("XDG_STATE_HOME") or
-                     os.path.expanduser("~/.local/state"), "plug")
-stem = re.sub(r"[^A-Za-z0-9._-]", "_", pid)
-for name in ("review-%s.json" % stem,):
-    try:
-        os.unlink(os.path.join(state, name))
-    except OSError:
-        pass
-hist = os.path.join(state, "locks.json")
-try:
-    with open(hist) as fh:
-        d = json.load(fh)
-    if isinstance(d, dict) and d.pop(pid, None) is not None:
-        tmp = hist + ".prune"
-        with open(tmp, "w") as fh:
-            json.dump(d, fh)
-        os.replace(tmp, hist)
-except Exception:
-    pass
-CLEANUP
+      python3 "$DIR/plugd.py" forget "$id" >/dev/null 2>&1 || true
     fi
     if [[ -n $err ]]; then finish "$id" "" "$err"; else finish "" "Removed $id" ""; fi
     ;;

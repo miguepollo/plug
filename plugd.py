@@ -1366,6 +1366,30 @@ def rollback(pid):
 
 # --------------------------------------------------- cli
 
+def forget(pid):
+    """Drop everything this manager remembers about a plugin it has removed.
+
+    This lived as an inline script in the control script and reimplemented
+    three helpers that already exist here — a reader with no ceiling and no
+    refusal of links or FIFOs, a stage file at a predictable name that a
+    planted symlink turns into the truncation of somebody else's file, and a
+    copy of safe_id that dropped the hash disambiguating two ids that clean
+    up to the same stem. Written once, in the file that already had all
+    three right.
+    """
+    forgot = []
+    try:
+        os.unlink(os.path.join(STATE_DIR, "review-%s.json" % safe_id(pid)))
+        forgot.append("review")
+    except OSError:
+        pass
+    hist = read_json(HISTORY_FILE, MAX_STATE_BYTES, {})
+    if isinstance(hist, dict) and hist.pop(pid, None) is not None:
+        write_atomic(HISTORY_FILE, hist)
+        forgot.append("lock")
+    return {"id": pid, "forgot": forgot}
+
+
 def main():
     ap = argparse.ArgumentParser(prog="plugd")
     sub = ap.add_subparsers(dest="cmd")
@@ -1373,7 +1397,7 @@ def main():
     sub.add_parser("check-updates")
     sub.add_parser("catalog")
     sub.add_parser("agents")
-    for name in ("scan", "review", "apply", "rollback"):
+    for name in ("scan", "review", "apply", "rollback", "forget"):
         p = sub.add_parser(name)
         p.add_argument("id")
     p = sub.add_parser("inspect")
@@ -1423,6 +1447,8 @@ def main():
         print(json.dumps(apply_update(args.id)))
     elif args.cmd == "rollback":
         print(json.dumps(rollback(args.id)))
+    elif args.cmd == "forget":
+        print(json.dumps(forget(args.id)))
 
 
 if __name__ == "__main__":
