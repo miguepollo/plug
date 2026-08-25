@@ -502,11 +502,12 @@ else: print(d.get("now") or "unknown")')
     fi
 
     if [[ -z $err ]]; then
-      # The approved version may not be the branch tip any more, so it is
-      # installed switched off and pinned before anything is allowed to run.
-      add_args=("$url" --yes)
-      [[ $mode == "--approved-version" ]] || add_args+=(--enable)
-      if out=$(omarchy plugin add "${add_args[@]}" 2>&1); then :; else
+      # Always switched off, whichever route got here. Enabling as part of the
+      # add means the shell loads and runs the code immediately, so the checks
+      # below would be inspecting something that had already run — and a
+      # branch that moved between the check above and this line would have
+      # been loaded before anything noticed. Off first, verified, then on.
+      if out=$(omarchy plugin add "$url" --yes 2>&1); then :; else
         err=$(last_line "$out")
         [[ -n $err ]] || err="omarchy plugin add failed"
       fi
@@ -535,18 +536,24 @@ else: print(d.get("now") or "unknown")')
             err="what arrived was not the version you approved — nothing was installed"
           fi
         fi
-        if [[ -z $err && $mode == "--approved-version" ]]; then
-          # Pinning rewrote files inside the plugin folder, and the shell
-          # disables a plugin whose files change under it. So switching it on
-          # has to come after that settles, and has to be confirmed rather
-          # than assumed — the first attempt can be undone a moment later.
-          for i in 1 2 3 4 5 6; do
-            sleep 0.6
-            is_on "$pid" && break
-            out=$(omarchy-shell shell setPluginEnabled "$pid" true 2>&1) || true
-          done
-          is_on "$pid" || err="installed at the version you approved, but it could not be switched on — turn it on from the list"
-        fi
+      fi
+    fi
+
+    # On, now that what landed has been confirmed to be what was read.
+    # Pinning rewrites files inside the plugin folder and the shell disables a
+    # plugin whose files change under it, so switching it on has to come after
+    # that settles, and has to be confirmed rather than assumed — the first
+    # attempt can be undone a moment later.
+    if [[ -z $err ]]; then
+      if [[ -z $pid ]]; then
+        err="installed, but its plugin id was unknown so it could not be switched on — turn it on from the list"
+      else
+        for i in 1 2 3 4 5 6; do
+          sleep 0.6
+          is_on "$pid" && break
+          out=$(omarchy-shell shell setPluginEnabled "$pid" true 2>&1) || true
+        done
+        is_on "$pid" || err="installed at the version you reviewed, but it could not be switched on — turn it on from the list"
       fi
     fi
 

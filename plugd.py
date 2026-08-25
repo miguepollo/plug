@@ -811,6 +811,36 @@ def snapshot(check_updates=False):
 
 # --------------------------------------------------- Claude review
 
+# What a reviewer is handed. It is about to read text a stranger wrote, with
+# the standing risk that some of that text is addressed to it rather than to
+# you, so it gets what it needs to run and to be itself and nothing else: the
+# credentials of the agent you picked, not of the two you did not, and none of
+# whatever else your shell happens to be carrying.
+ENV_KEEP = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "LANG", "TZ",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
+))
+ENV_KEEP_PREFIXES = {
+    "claude": ("ANTHROPIC_", "CLAUDE_"),
+    "codex": ("OPENAI_", "CODEX_"),
+    "gemini": ("GEMINI_", "GOOGLE_"),
+}
+
+
+def reviewer_env(agent):
+    keep = ENV_KEEP_PREFIXES.get(agent, ())
+    env = {k: v for k, v in os.environ.items()
+           if k in ENV_KEEP or k.startswith("LC_") or k.startswith(keep)}
+    # Its own configuration and credentials live under the real home, so the
+    # home is the one thing that has to be right rather than merely present.
+    env["HOME"] = HOME
+    return env
+
+
 REVIEW_SYSTEM = (
     "You are reviewing a proposed update to an Omarchy desktop plugin for a "
     "user who does NOT read code and is trusting you to judge it for them. "
@@ -1001,16 +1031,25 @@ def run_agent(diff, scan_facts, plugin_name, context="update"):
             elif agent == "codex":
                 # Read-only sandbox, no network, one shot. The framing goes in
                 # the prompt since codex has no separate system-prompt flag.
-                cmd = ["codex", "exec", "--sandbox", "read-only"]
+                # --skip-git-repo-check because the reviewer deliberately
+                # runs in an empty directory that is not a repository, and
+                # without it codex refuses to start at all — the reviewer you
+                # chose would fall back to the offline scan without saying so.
+                cmd = ["codex", "exec", "--sandbox", "read-only",
+                       "--skip-git-repo-check"]
                 if model:
                     cmd += ["--model", model]
                 cmd += [arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
             elif agent == "gemini":
-                # Gemini CLI, one-shot prompt mode. Sandbox on where supported.
-                cmd = ["gemini", "-p", arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
+                # Gemini CLI, one-shot prompt mode, in its own read-only
+                # approval mode — the nearest thing it offers to Claude's
+                # plan mode. Its --sandbox needs a container runtime that may
+                # not be here, so it is not assumed; see the README, which
+                # says plainly what each reviewer does and does not get.
+                cmd = ["gemini", "--approval-mode", "plan"]
                 if model:
-                    cmd = ["gemini", "-m", model, "-p",
-                           arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
+                    cmd += ["-m", model]
+                cmd += ["-p", arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
             else:
                 return offline_summary(diff, scan_facts, plugin_name)
 
@@ -1030,7 +1069,7 @@ def run_agent(diff, scan_facts, plugin_name, context="update"):
                 proc = subprocess.Popen(
                     cmd, stdin=(stdin_file or subprocess.DEVNULL),
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    cwd=empty, env={**os.environ, "HOME": HOME})
+                    cwd=empty, env=reviewer_env(agent))
                 if stdin_file is not None:
                     stdin_file.close()
                 try:

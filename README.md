@@ -53,7 +53,20 @@ The reviewer is entirely your choice, set in **Settings**. Plug offers only the
 tools you actually have:
 
 - **Command-line agents** — Claude Code, Codex, or Gemini, if their command is
-  installed. Plug runs them once, read-only.
+  installed. Each is run once, in an empty working directory, with a trimmed
+  environment holding only that agent's own credentials and nothing else your
+  shell was carrying. How contained that run actually is differs by tool, and
+  the difference is worth knowing before you pick one:
+  - **Claude Code** — no tools at all, in plan mode. It reads the diff it was
+    given and has nothing else to act with.
+  - **Codex** — a read-only sandbox, so it cannot write anything. It keeps its
+    file-reading tools, so a prompt-injection buried in a plugin's source could
+    in principle talk it into reading something else.
+  - **Gemini** — asked for its own read-only plan mode, but Gemini overrides
+    that itself when the working directory is untrusted, which Plug's
+    deliberately is. Its container sandbox is not assumed either, since it
+    needs a container runtime that may not be installed. Treat it as the least
+    contained of the three.
 - **Local servers** — Ollama or LM Studio, if they are running. The review is a
   request to `localhost`, so **nothing leaves your machine** — a real LLM review
   that is completely private. Their loaded models are listed automatically.
@@ -177,10 +190,13 @@ shell process that stays up for days, so all of it is treated as data:
 - A hotkey is validated against a fixed shape in both the settings view and the
   helper script, and refused rather than escaped, because it becomes Lua source
   in `bindings.lua`.
-- The AI reviewer is run **structurally read-only** — no tools, in an empty
-  working directory — so a prompt-injection hidden in an update's diff, or in
-  the source of a plugin being checked, has nothing to act on. It is data the
-  reviewer reads, never instructions it follows.
+- The AI reviewer is handed the diff as data, never as instructions, in an
+  empty working directory and with an environment trimmed to that agent's own
+  credentials. With **Claude Code** that is genuinely nothing to act with: no
+  tools at all. **Codex** and **Gemini** keep read-capable tooling of their
+  own, so what contains them is the sandbox each provides rather than an
+  absence of tools — see [Choosing your reviewer](#choosing-your-reviewer) for
+  what each one actually gets. Pick accordingly.
 - `git` runs against each untrusted checkout with the repository's own hooks and
   config disabled, so inspecting a plugin can never run code from it.
 - A repository address is checked against a plain `https` shape before git is
