@@ -73,6 +73,19 @@ AGENTS = {
         "models": ["gemini-2.5-flash", "gemini-2.5-pro"],
         "default_model": "gemini-2.5-flash", "private": False,
     },
+    "opencode": {
+        "label": "Opencode", "type": "cli", "bin": "opencode",
+        "models": [
+            "opencode/muse-spark-1.2-contributor-free",
+            "opencode/big-pickle",
+            "opencode/mimo-v2.5-free",
+            "opencode/nemotron-3-ultra-free",
+            "opencode/nemotron-3.5-lightning-free",
+            "opencode/ling-3.0-flash-fin-free",
+        ],
+        "default_model": "opencode/muse-spark-1.2-contributor-free",
+        "private": False,
+    },
     "ollama": {
         "label": "Ollama (local, private)", "type": "http",
         "base": "http://localhost:11434", "models_path": "/api/tags",
@@ -945,6 +958,32 @@ def http_agent_models(spec):
     return models
 
 
+def opencode_cli_models(spec):
+    """Ask the opencode CLI what models it knows. Returns None if opencode
+    is not usable, otherwise a list (possibly empty). Tries `opencode models`
+    so Zen and provider models stay current without hard-coding."""
+    try:
+        proc = subprocess.Popen(
+            [spec["bin"], "models"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={k: v for k, v in os.environ.items()
+                 if k in ENV_KEEP or k.startswith("OPENCODE_")
+                 or k.startswith("LC_")},
+        )
+        out, _ = proc.communicate(timeout=6)
+        if proc.returncode != 0:
+            return None
+        models = []
+        for line in (out or b"").decode("utf-8", "replace").splitlines():
+            s = line.strip()
+            if s and "/" in s and not s.startswith("#"):
+                models.append(s)
+        # If the CLI answered but gave nothing, fall back to the static list
+        return models if models else list(spec.get("models") or [])
+    except Exception:
+        return None
+
+
 def agent_available(agent_key):
     spec = AGENTS.get(agent_key)
     if not spec:
@@ -968,8 +1007,37 @@ def available_agents():
             from shutil import which
             if which(spec["bin"]) is None:
                 continue
-            models = spec["models"]
-            default = spec["default_model"]
+            if key == "opencode":
+                models = opencode_cli_models(spec)
+                if models is None:
+                    continue
+                # El modelo por defecto es el que el usuario tenga configurado
+                # en opencode (opencode.json -> model), si existe y está
+                # disponible. Si no, se usa el default estático o el primero.
+                configured = ""
+                for cfg_path in (
+                    os.path.join(HOME, ".config/opencode/opencode.json"),
+                    os.path.join(HOME, ".config/opencode/opencode.jsonc"),
+                ):
+                    try:
+                        cfg = read_json(cfg_path, 64 * 1024, {}, follow=True)
+                        if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
+                            configured = cfg["model"].strip()
+                            if configured:
+                                break
+                    except Exception:
+                        continue
+                # OPENCODE_MODEL env también cuenta como configurado
+                if not configured:
+                    configured = os.environ.get("OPENCODE_MODEL", "").strip()
+                if configured and configured in models:
+                    default = configured
+                else:
+                    dm = spec.get("default_model", "")
+                    default = dm if dm in models else (models[0] if models else dm)
+            else:
+                models = spec["models"]
+                default = spec["default_model"]
         else:
             models = http_agent_models(spec)
             if models is None:
@@ -1102,6 +1170,11 @@ ENV_KEEP_PREFIXES = {
     "claude": ("ANTHROPIC_", "CLAUDE_"),
     "codex": ("OPENAI_", "CODEX_"),
     "gemini": ("GEMINI_", "GOOGLE_"),
+    "opencode": (
+        "OPENCODE_", "ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_",
+        "CODEX_", "CLAUDE_", "COHERE_", "MISTRAL_", "GROQ_", "DEEPSEEK_",
+        "XAI_", "AZURE_", "AWS_", "OPENROUTER_", "HUGGINGFACE_", "HF_",
+    ),
 }
 
 
@@ -1372,6 +1445,17 @@ def run_agent(diff, scan_facts, plugin_name, context="update",
                 if model:
                     cmd += ["-m", model]
                 cmd += ["-p", arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
+            elif agent == "opencode":
+                # Opencode — non-interactive `run` with JSON events. The `plan`
+                # agent denies edits (read-only) which mirrors Claude's plan
+                # mode; the empty working directory keeps even reads harmless.
+                # Prompt travels as an argument, trimmed to the OS limit so a
+                # large diff degrades gracefully rather than failing silently.
+                cmd = ["opencode", "run", "--format", "json",
+                       "--agent", "plan"]
+                if model:
+                    cmd += ["-m", model]
+                cmd += [arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
             else:
                 return offline_summary(diff, scan_facts, plugin_name, context)
 
@@ -1412,6 +1496,26 @@ def run_agent(diff, scan_facts, plugin_name, context="update",
                         proc.kill()
                     proc.wait(timeout=5)
                 raw = (out or b"").decode("utf-8", "replace").strip()
+                # Opencode's JSON mode emits NDJSON events; extract text parts
+                if agent == "opencode" and raw:
+                    try:
+                        texts = []
+                        for ln in raw.splitlines():
+                            ln = ln.strip()
+                            if not ln:
+                                continue
+                            try:
+                                ev = json.loads(ln)
+                            except ValueError:
+                                continue
+                            if ev.get("type") == "text" and isinstance(ev.get("part"), dict):
+                                t = ev["part"].get("text")
+                                if isinstance(t, str) and t.strip():
+                                    texts.append(t)
+                        if texts:
+                            raw = "\n".join(texts).strip()
+                    except Exception:
+                        pass
             finally:
                 try:
                     os.rmdir(empty)

@@ -87,7 +87,7 @@ English, whether it is safe.
 The reviewer is entirely your choice, set in **Settings**. Plug offers only the
 tools you actually have:
 
-- **Command-line agents** — Claude Code, Codex, or Gemini, if their command is
+- **Command-line agents** — Claude Code, Codex, Gemini, or Opencode, if their command is
   installed. Each is run once, in an empty working directory, with a trimmed
   environment holding only that agent's own credentials and nothing else your
   shell was carrying. How contained that run actually is differs by tool, and
@@ -102,6 +102,11 @@ tools you actually have:
     deliberately is. Its container sandbox is not assumed either, since it
     needs a container runtime that may not be installed. Treat it as the least
     contained of the three.
+  - **Opencode** — run with `opencode run --agent plan --format json`, in plan
+    mode (read-only, denies edits). Like Codex it keeps read-capable tooling,
+    so what contains it is the empty working directory and the read-only plan
+    sandbox. Supports any provider configured in opencode (Zen models work out
+    of the box with `opencode auth`).
 - **Local servers** — Ollama or LM Studio, if they are running. The review is a
   request to `localhost`, so **nothing leaves your machine** — a real LLM review
   that is completely private. Their loaded models are listed automatically.
@@ -116,11 +121,13 @@ that command uses the sign-in it already has. With Claude Code, that is the
 Claude account set up in your terminal. If the tool is not signed in, the review
 falls back to the offline scan.
 
-**Privacy.** A cloud agent (Claude, Codex, Gemini) is sent the code it is asked
+**Privacy.** A cloud agent (Claude, Codex, Gemini, Opencode with a cloud model) is sent the code it is asked
 to judge, and only then: the diff when you review an update, the plugin's full
 source when you check one before installing it. That code is public and comes
 from a public repository, but it does leave your machine. A local server (Ollama,
-LM Studio) or the offline scan keeps everything on it.
+LM Studio) or the offline scan keeps everything on it. With Opencode the
+destination depends on the model you pick — a Zen/cloud model leaves the
+machine, a local model does not.
 
 ## Install
 
@@ -183,7 +190,7 @@ own engine); `bash` (Plug's own `plug-ctl.sh`); `wl-copy` (only when you press
 **Copy the commands** on a manual install, with the commands passed as an
 argument rather than through a shell); `xdg-open` (only when you open a
 plugin's repository page); and the AI reviewer you chose — either its command
-(`claude` / `codex` / `gemini`) or a request to a local server on `localhost`.
+(`claude` / `codex` / `gemini` / `opencode`) or a request to a local server on `localhost`.
 
 **Network:** each installed plugin's git remote, to check for and fetch updates;
 the repository of a store plugin you ask Plug to check before installing;
