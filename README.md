@@ -26,7 +26,12 @@ English, whether it is safe.
   source: what it can reach, run and write. It scores code that runs. Comments
   are ignored, as is text the plugin displays, and a command quoted for you to
   copy yourself counts far more lightly than one the plugin runs itself. A long
-  line counts as packed or encoded content only when nothing breaks it up.
+  line counts as packed or encoded content only when nothing breaks it up. A
+  plugin's install script is weighed lightly too, and named in words on the row
+  instead — it is a step you take once, knowingly, after Plug has printed every
+  line of it for you, and scoring it like code the plugin runs would put every
+  plugin that needs a compiled daemon in the same colour as a genuinely alarming
+  one.
 - **Review an update** — Plug fetches the exact changes, runs a fast offline
   scan, and hands the diff to your chosen AI reviewer (read-only). You get a
   **safe / be careful / do not** verdict, a plain-English summary of what

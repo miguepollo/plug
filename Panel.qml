@@ -319,6 +319,7 @@ Item {
           // undefined falls back to its default (true), which would wrongly
           // light up these badges on built-in plugins.
           updateAvailable: false, canRevert: false, iconHidden: false,
+          hasInstallScript: false,
           trustScore: -1, capabilities: [], commitsBehind: 0
         })
         continue
@@ -336,6 +337,7 @@ Item {
         // the bar, so a plugin whose icon its owner switched off reports as
         // disabled while running perfectly well. It is on; its icon is not.
         iconHidden: a.iconHidden === true,
+        hasInstallScript: a.hasInstallScript === true,
         updateAvailable: a.updateAvailable === true,
         commitsBehind: a.commitsBehind || 0,
         trustScore: (a.trustScore === undefined ? -1 : a.trustScore),
@@ -1811,6 +1813,10 @@ Item {
               : rowData.official ? (rowData.kinds || "built-in")
               : rowData.updateAvailable ? (rowData.commitsBehind + " new change" + (rowData.commitsBehind === 1 ? "" : "s") + " · press update to review")
               : rowData.iconHidden ? "on · bar icon hidden"
+              // Said in words rather than counted into the dot. A plugin that
+              // needs a step you run yourself is worth knowing about, and it
+              // is not the same fact as "this plugin is risky".
+              : rowData.hasInstallScript ? (rowData.id + " · installs by hand")
               : (rowData.id + (rowData.kinds ? " · " + rowData.kinds : ""))
           textFormat: Text.PlainText
           color: confirming ? root.dangerColor : root.dim

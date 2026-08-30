@@ -421,6 +421,11 @@ SHELL_EXT = (".sh", ".bash")
 # like the real thing, but not free either: it is still in the source.
 MENTION_PENALTY = (1, 5)
 
+# What a finding inside an install script costs. Light on purpose — see the
+# note in scan_plugin. The card names the script and prints its lines, which
+# is a better signal than a colour and does not go stale.
+INSTALL_SCRIPT_PENALTY = (5, 12)
+
 
 def split_line(line, lc, in_block):
     """Split one source line into the part that executes and the strings it
@@ -587,16 +592,33 @@ def scan_files(root, only_files=None):
         yield rel, raw.decode("utf-8", "replace"), ext
 
 
-def scan_plugin(dirpath, only_files=None):
+def scan_plugin(dirpath, only_files=None, light_files=None):
     """A capability read of a plugin's source. Returns the trust score, the
     capabilities present, and a few example lines per class — the material
-    Claude is given, and a quick colour for the panel."""
+    Claude is given, and a quick colour for the panel.
+
+    The dot answers "what does this do once it is running", and an install
+    script is not that: it is a step you take once, knowingly, after the panel
+    has printed its every line for you. Scoring it like runtime code sent a
+    plugin that talks to earbuds below Plug itself, which clones strangers'
+    repositories for a living — and any plugin needing a compiled daemon would
+    have gone the same way, so the colour would have marked a category rather
+    than a risk, and a signal that fires on a whole category is one people stop
+    reading. Findings inside a detected install script are therefore weighed
+    lightly and surfaced in words instead; findings in the plugin's own code
+    keep full weight, because a plugin running a package manager while the
+    shell is up is a different animal entirely."""
+    if light_files is None:
+        light_files = set(install_script_names(dirpath))
     hits = {}          # class -> set of "rel:lineno" (unique lines)
     mentions = {}      # class -> lines that only quote it, never run it
+    light = {}         # class -> lines inside an install script
     examples = {}      # class -> list of {file, line, text}
     for rel, text, ext in scan_files(dirpath, only_files):
         lc = LINE_COMMENT.get(ext, "#")
         shell = ext in SHELL_EXT
+        # Install scripts sit at the top level, so the name is the whole path.
+        in_install = rel in light_files
         in_block = False
         for i, line in enumerate(text.split("\n"), 1):
             code, strings, in_block, uncommented = split_line(line, lc, in_block)
@@ -610,7 +632,8 @@ def scan_plugin(dirpath, only_files=None):
             # it runs something.
             runs = None
             if len(line) > 2000 and LONG_TOKEN.search(line):
-                hits.setdefault("obfuscation", set()).add(key)
+                (light if in_install else hits) \
+                    .setdefault("obfuscation", set()).add(key)
             # Nothing is ever suppressed: a string that is not executed is
             # counted lightly, never dropped. Suppressing displayed text meant
             # a call prefixed with `text:` or `title:` disappeared from the
@@ -624,7 +647,9 @@ def scan_plugin(dirpath, only_files=None):
                     runs = bool(EXEC_CONSTRUCT.search(code)
                                 or (shell and SHELL_EXEC.search(uncommented)))
                 # A quoted command the plugin does not run is a mention.
-                bucket = hits if (in_code or runs) else mentions
+                is_mention = not (in_code or runs)
+                bucket = (light if in_install
+                          else mentions if is_mention else hits)
                 seen = bucket.setdefault(cls, set())
                 if key in seen:
                     continue
@@ -632,7 +657,7 @@ def scan_plugin(dirpath, only_files=None):
                 ex = examples.setdefault(cls, [])
                 if len(ex) < MAX_FINDINGS_PER_CLASS:
                     ex.append({"file": rel, "line": i,
-                               "quotedOnly": bucket is mentions,
+                               "quotedOnly": is_mention,
                                "text": line.strip()[:200]})
     score = 100
     caps = []
@@ -645,10 +670,22 @@ def scan_plugin(dirpath, only_files=None):
         score -= min(cap, per * len(mentions[cls]))
         if cls not in caps:
             caps.append(cls)
+    # Enough to sort a plugin with an install step below one without, and not
+    # enough to drown out what the plugin itself does.
+    per, cap = INSTALL_SCRIPT_PENALTY
+    for cls in light:
+        score -= min(cap, per * len(light[cls]))
+        if cls not in caps:
+            caps.append(cls)
     return {"trustScore": max(0, score), "capabilities": sorted(caps),
             "examples": examples,
             "counts": {c: len(hits[c]) for c in hits},
-            "quotedOnly": {c: len(mentions[c]) for c in mentions}}
+            "quotedOnly": {c: len(mentions[c]) for c in mentions},
+            # Kept apart from `counts` so the reviewer, and anything else
+            # reading this, can tell "the plugin does X" from "a script you
+            # would run to install it does X".
+            "installScript": {c: len(light[c]) for c in light},
+            "hasInstallScript": bool(light_files)}
 
 
 # A step you run yourself, after the clone. `omarchy plugin add` copies files
@@ -667,12 +704,11 @@ MAX_INSTALL_STEPS = 12
 INSTALL_EXT = (".sh", ".bash", ".py")
 
 
-def install_scripts(root):
-    """Scripts at the root of a plugin that an install would leave for the
-    user to run. Two things qualify one: a name that says what it is, or a
-    root-level script nothing else in the plugin ever calls — a control script
-    invoked from the QML is part of the running plugin, not part of installing
-    it. Each is reported with what the scan found inside it."""
+def install_script_names(root):
+    """Just the names, without reading anything into a verdict — the scoring
+    needs to know which files these are before it can weigh them, and it
+    cannot ask install_scripts() for that without the two calling each other
+    in a circle."""
     try:
         names = sorted(os.listdir(root))
     except OSError:
@@ -696,12 +732,24 @@ def install_scripts(root):
         for name in scripts:
             if name != base and name in text:
                 referenced.add(name)
+    return [n for n in scripts
+            if INSTALL_SCRIPT_NAMES.match(n) or n not in referenced]
+
+
+def install_scripts(root):
+    """Scripts at the root of a plugin that an install would leave for the
+    user to run. Two things qualify one: a name that says what it is, or a
+    root-level script nothing else in the plugin ever calls — a control script
+    invoked from the QML is part of the running plugin, not part of installing
+    it. Each is reported with what the scan found inside it."""
     out = []
-    for name in scripts:
+    for name in install_script_names(root):
         named = bool(INSTALL_SCRIPT_NAMES.match(name))
-        if not named and name in referenced:
-            continue
-        sc = scan_plugin(root, only_files=[os.path.join(root, name)])
+        # Scored at full weight here on purpose: this is the report on the
+        # script itself, where the whole point is to say what it does. The
+        # light weighting belongs to the plugin's trust dot, not to this.
+        sc = scan_plugin(root, only_files=[os.path.join(root, name)],
+                         light_files=set())
         try:
             lines = len(read_capped(os.path.join(root, name),
                                     MAX_SOURCE_BYTES, follow=True)
@@ -968,6 +1016,7 @@ def snapshot(check_updates=False):
             "upstreamRef": gs["upstreamRef"],
             "trustScore": sc["trustScore"],
             "capabilities": sc["capabilities"],
+            "hasInstallScript": sc.get("hasInstallScript", False),
             "reviewedSha": hist.get(pid, {}).get("reviewedSha", ""),
             "previousSha": hist.get(pid, {}).get("previousSha", ""),
             # Loaded, but with its bar icon switched off by its owner.
@@ -1573,6 +1622,10 @@ def inspect_repo(url):
                  "capabilities": scan["capabilities"],
                  "runs": scan.get("counts", {}),
                  "quotedOnly": scan.get("quotedOnly", {}),
+                 # Kept apart so the reviewer is not told that the plugin
+                 # itself installs packages when what installs them is a
+                 # script the user runs once, by hand.
+                 "installScriptRuns": scan.get("installScript", {}),
                  "declaredKinds": manifest.get("kinds", []),
                  "installScripts": steps}
         listing = source_listing(dest)
