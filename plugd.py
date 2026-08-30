@@ -961,25 +961,65 @@ def http_agent_models(spec):
 def opencode_cli_models(spec):
     """Ask the opencode CLI what models it knows. Returns None if opencode
     is not usable, otherwise a list (possibly empty). Tries `opencode models`
-    so Zen and provider models stay current without hard-coding."""
+    so Zen and provider models stay current without hard-coding.
+    Si tu default no es Zen (ej. anthropic/claude-*, openai/gpt-*),
+    `opencode models` sin filtro solo lista opencode/*; por eso se
+    intenta también listar por provider cuando hay credenciales."""
+    def _run_models(args):
+        try:
+            proc = subprocess.Popen(
+                [spec["bin"]] + args,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={k: v for k, v in os.environ.items()
+                     if k in ENV_KEEP or k.startswith("OPENCODE_")
+                     or k.startswith("LC_") or k.startswith("ANTHROPIC_")
+                     or k.startswith("OPENAI_") or k.startswith("GOOGLE_")
+                     or k.startswith("GEMINI_")},
+            )
+            out, _ = proc.communicate(timeout=6)
+            if proc.returncode != 0:
+                return []
+            lst = []
+            for line in (out or b"").decode("utf-8", "replace").splitlines():
+                s = line.strip()
+                if s and "/" in s and not s.startswith("#"):
+                    lst.append(s)
+            return lst
+        except Exception:
+            return []
+
     try:
-        proc = subprocess.Popen(
-            [spec["bin"], "models"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env={k: v for k, v in os.environ.items()
-                 if k in ENV_KEEP or k.startswith("OPENCODE_")
-                 or k.startswith("LC_")},
-        )
-        out, _ = proc.communicate(timeout=6)
-        if proc.returncode != 0:
+        models = _run_models(["models"])
+        if models is None:
             return None
-        models = []
-        for line in (out or b"").decode("utf-8", "replace").splitlines():
-            s = line.strip()
-            if s and "/" in s and not s.startswith("#"):
-                models.append(s)
-        # If the CLI answered but gave nothing, fall back to the static list
-        return models if models else list(spec.get("models") or [])
+        # Si el usuario no usa Zen, los modelos de su provider no aparecen
+        # en el listado general. Intenta providers comunes si hay indicio
+        # de credencial (env o auth.json) para no dejar la lista vacía de
+        # su provider real. anthropic/openai/google se intentan siempre
+        # porque son los más comunes sin Zen.
+        always = {"anthropic", "openai", "google"}
+        if models == [] or any(m.startswith("opencode/") for m in models):
+            for prov in ("anthropic", "openai", "google", "openrouter", "azure", "mistral", "groq", "deepseek", "xai", "cohere"):
+                should_try = prov in always
+                if not should_try:
+                    has_env = any(prov in k.lower() for k in os.environ)
+                    has_auth = False
+                    try:
+                        auth_path = os.path.join(HOME, ".local/share/opencode/auth.json")
+                        if os.path.exists(auth_path):
+                            with open(auth_path, "r") as f:
+                                has_auth = prov in f.read().lower()
+                    except Exception:
+                        pass
+                    should_try = has_env or has_auth
+                if not should_try:
+                    continue
+                for m in _run_models(["models", prov]):
+                    if m not in models:
+                        models.append(m)
+        if not models:
+            return list(spec.get("models") or [])
+        return models
     except Exception:
         return None
 
@@ -1030,7 +1070,13 @@ def available_agents():
                 # OPENCODE_MODEL env también cuenta como configurado
                 if not configured:
                     configured = os.environ.get("OPENCODE_MODEL", "").strip()
-                if configured and configured in models:
+                # Si no tienes Zen y tu default es de otro provider
+                # (anthropic/claude-*, openai/gpt-*, google/gemini-*...),
+                # debe respetarse igual aunque `opencode models` solo
+                # liste opencode/* por no haber filtrado por provider.
+                if configured:
+                    if configured not in models:
+                        models = [configured] + models
                     default = configured
                 else:
                     dm = spec.get("default_model", "")
