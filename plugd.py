@@ -388,9 +388,73 @@ PATTERN_ROWS = [
     ("obfuscation", "high", re.compile(r"atob\(|\bbase64 -d\b|base64 --decode|\beval\(|\bexec\(|\\u00[0-9a-fA-F]{2}\\u00")),
 ]
 
-PENALTY = {"network": (12, 30), "process": (4, 15), "fileWrite": (3, 10),
-           "sensitive": (10, 30), "privilege": (20, 40), "obfuscation": (15, 30),
-           "install": (15, 35)}
+# Three bands, not a number.
+#
+# A 0-100 score claimed a precision this scanner has never had. Nobody could
+# say what 44 meant, the weights behind it were invented, and comparing two
+# plugins by it compared two guesses. Worse, arithmetic hid the one thing that
+# actually matters: a plugin *displaying* the text "sudo systemctl enable" and
+# a plugin *running* sudo both moved the number, in the same direction, by an
+# amount that depended on how many times each did it.
+#
+# So the question is asked directly instead. Red is not "scored badly", it is
+# "this contains something obviously fishy", and it stays rare enough to mean
+# something when it appears. Amber is the honest middle: this reaches past
+# itself, and here is how. Green is squeaky clean.
+TRUST_RED, TRUST_AMBER, TRUST_GREEN = "red", "amber", "green"
+
+# Things with no innocent explanation in a bar plugin when the code actually
+# runs them: reading somebody's keys, escalating, hiding what it does behind
+# an encoder, or driving a package manager while the shell is up.
+ALARMING = ("sensitive", "privilege", "obfuscation", "install")
+
+# Reaching off the machine is not alarming — most useful plugins do it — but
+# it is not squeaky clean either, and it is the difference between a plugin
+# that could leak something and one that could not.
+REACHES_OUT = ("network",)
+
+# Short enough to sit on a row next to a plugin's name.
+CAP_SHORT = {"sensitive": "private files", "privilege": "commands as root",
+             "obfuscation": "hidden code", "install": "a package manager",
+             "network": "the network", "process": "other programs",
+             "fileWrite": "files"}
+
+
+def trust_why(hits, mentions, light, light_files):
+    """Why a plugin is not green, in a few words. A colour nobody can account
+    for is the thing that made the old number useless, so the reason travels
+    with the band and is never derived a second time at the panel."""
+    why = []
+    ran = [c for c in ALARMING if c in hits]
+    if ran:
+        why.append("runs " + ", ".join(CAP_SHORT.get(c, c) for c in ran))
+    if any(c in hits or c in mentions for c in REACHES_OUT):
+        why.append("reaches the network")
+    if light_files:
+        why.append("installs by hand")
+    # Only what the plugin displays. What an install script does is already
+    # said by "installs by hand", and calling it "shows you a package manager"
+    # described the opposite of what that script does.
+    quoted = [c for c in ALARMING if c in mentions]
+    if quoted:
+        why.append("shows you " + ", ".join(CAP_SHORT.get(c, c) for c in quoted))
+    return " · ".join(why)
+
+
+def trust_band(hits, mentions, light, light_files):
+    """Which of the three a plugin lands in, from what the scan found.
+
+    `hits` is code that runs, `mentions` are strings it only displays, and
+    `light` is what a script you would run by hand does. The distinction is
+    the whole point: quoting `sudo systemctl enable` on screen for a user to
+    copy is a plugin being helpful, and running it is a plugin escalating."""
+    if any(c in hits for c in ALARMING):
+        return TRUST_RED
+    quoted_alarm = any(c in mentions or c in light for c in ALARMING)
+    reaches = any(c in hits or c in mentions for c in REACHES_OUT)
+    if quoted_alarm or reaches or light_files:
+        return TRUST_AMBER
+    return TRUST_GREEN
 
 # Which line comment starts a comment, per file type. Block comments (/* */)
 # are handled for the C-style ones.
@@ -417,14 +481,7 @@ EXEC_CONSTRUCT = re.compile(
 SHELL_EXEC = re.compile(r"\$\(|`")
 SHELL_EXT = (".sh", ".bash")
 
-# What a mention costs, and the most all mentions together can cost. Nothing
-# like the real thing, but not free either: it is still in the source.
-MENTION_PENALTY = (1, 5)
 
-# What a finding inside an install script costs. Light on purpose — see the
-# note in scan_plugin. The card names the script and prints its lines, which
-# is a better signal than a colour and does not go stale.
-INSTALL_SCRIPT_PENALTY = (5, 12)
 
 
 def split_line(line, lc, in_block):
@@ -659,25 +716,10 @@ def scan_plugin(dirpath, only_files=None, light_files=None):
                     ex.append({"file": rel, "line": i,
                                "quotedOnly": is_mention,
                                "text": line.strip()[:200]})
-    score = 100
-    caps = []
-    for cls in hits:
-        per, cap = PENALTY.get(cls, (3, 10))
-        score -= min(cap, per * len(hits[cls]))
-        caps.append(cls)
-    per, cap = MENTION_PENALTY
-    for cls in mentions:
-        score -= min(cap, per * len(mentions[cls]))
-        if cls not in caps:
-            caps.append(cls)
-    # Enough to sort a plugin with an install step below one without, and not
-    # enough to drown out what the plugin itself does.
-    per, cap = INSTALL_SCRIPT_PENALTY
-    for cls in light:
-        score -= min(cap, per * len(light[cls]))
-        if cls not in caps:
-            caps.append(cls)
-    return {"trustScore": max(0, score), "capabilities": sorted(caps),
+    caps = sorted(set(hits) | set(mentions) | set(light))
+    return {"trustBand": trust_band(hits, mentions, light, light_files),
+            "trustWhy": trust_why(hits, mentions, light, light_files),
+            "capabilities": caps,
             "examples": examples,
             "counts": {c: len(hits[c]) for c in hits},
             "quotedOnly": {c: len(mentions[c]) for c in mentions},
@@ -1014,7 +1056,8 @@ def snapshot(check_updates=False):
             "branch": gs["branch"],
             "remote": gs["remote"],
             "upstreamRef": gs["upstreamRef"],
-            "trustScore": sc["trustScore"],
+            "trustBand": sc["trustBand"],
+            "trustWhy": sc["trustWhy"],
             "capabilities": sc["capabilities"],
             "hasInstallScript": sc.get("hasInstallScript", False),
             "reviewedSha": hist.get(pid, {}).get("reviewedSha", ""),
@@ -1126,8 +1169,11 @@ def offline_summary(diff, scan_facts, plugin_name, context="update"):
     English from the offline scan alone. This is a fallback, not a verdict as
     trustworthy as a real read of the diff — and it says so."""
     caps = scan_facts.get("capabilities", [])
-    serious = [c for c in ("sensitive", "privilege", "install", "obfuscation")
-               if c in caps]
+    # `capabilities` does not say whether a class was run or merely displayed,
+    # so it is the wrong thing to raise an alarm from — it read "this update
+    # involves privilege" for a plugin printing an install line on screen. The
+    # band has already drawn that distinction; use its answer.
+    serious = [c for c in ALARMING if c in (scan_facts.get("runs") or {})]
     # The same scan answers two different questions, and saying "this update"
     # about a plugin that is not installed yet describes something that is not
     # happening.
@@ -1153,7 +1199,11 @@ def offline_summary(diff, scan_facts, plugin_name, context="update"):
             % (s.get("file", "a script"), s.get("lines", 0),
                " — it can " + does if does else ""))
     if serious:
-        verdict = "CAUTION"
+        # Code that runs one of these has no innocent reading, which is the
+        # whole definition of the red band — so the fallback says DANGER
+        # rather than hedging at CAUTION and leaving Enter armed.
+        verdict = ("DANGER" if scan_facts.get("trustBand") == TRUST_RED
+                   else "CAUTION")
         headline = (("This plugin would " if install else "This update involves ") +
                     " and ".join(CAP_ENGLISH.get(c, c) for c in serious) +
                     (" — worth a closer look before you install it."
@@ -1483,7 +1533,8 @@ def review(pid):
     # pipes a download into a shell was described to the reviewer as having no
     # capabilities at all, next to a trust score belonging to the old version.
     scan = scan_tree_at(dirpath, to_ref) or scan_plugin(dirpath)
-    facts = {"trustScore": scan["trustScore"],
+    facts = {"trustBand": scan["trustBand"],
+             "trustWhy": scan["trustWhy"],
              "capabilities": scan["capabilities"],
              # Told apart so the reviewer knows which of these the plugin
              # actually does and which it only quotes in its own text.
@@ -1618,7 +1669,8 @@ def inspect_repo(url):
         pid = manifest.get("id", "")
         scan = scan_plugin(dest)
         steps = install_scripts(dest)
-        facts = {"trustScore": scan["trustScore"],
+        facts = {"trustBand": scan["trustBand"],
+             "trustWhy": scan["trustWhy"],
                  "capabilities": scan["capabilities"],
                  "runs": scan.get("counts", {}),
                  "quotedOnly": scan.get("quotedOnly", {}),
@@ -1639,7 +1691,8 @@ def inspect_repo(url):
                 "isPlugin": bool(pid),
                 "manualInstall": {"required": bool(steps), "scripts": steps},
                 "generatedAt": now_iso(), "review": verdict,
-                "trustScore": scan["trustScore"],
+                "trustBand": scan["trustBand"],
+                "trustWhy": scan["trustWhy"],
                 "capabilities": scan["capabilities"],
                 "sourceBytes": len(listing)}
     finally:

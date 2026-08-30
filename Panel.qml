@@ -105,10 +105,16 @@ Item {
   readonly property color okColor: "#3fb950"
   readonly property color warnColor: "#d29922"
   readonly property color dangerColor: "#f85149"
-  function trustColor(score) {
-    if (score >= 70) return root.okColor
-    if (score >= 35) return root.warnColor
-    return root.dangerColor
+  // Three bands, decided by the engine from what it found, not by a number
+  // computed from invented weights. Green is squeaky clean, red is code that
+  // actually runs something with no innocent explanation, amber is the honest
+  // middle — and `trustWhy` says which, so the colour is never the whole
+  // answer.
+  function trustColor(band) {
+    if (band === "green") return root.okColor
+    if (band === "red") return root.dangerColor
+    if (band === "amber") return root.warnColor
+    return root.fainter
   }
   function verdictColor(v) {
     if (v === "SAFE") return root.okColor
@@ -320,7 +326,7 @@ Item {
           // light up these badges on built-in plugins.
           updateAvailable: false, canRevert: false, iconHidden: false,
           hasInstallScript: false,
-          trustScore: -1, capabilities: [], commitsBehind: 0
+          trustBand: "", trustWhy: "", capabilities: [], commitsBehind: 0
         })
         continue
       }
@@ -340,7 +346,8 @@ Item {
         hasInstallScript: a.hasInstallScript === true,
         updateAvailable: a.updateAvailable === true,
         commitsBehind: a.commitsBehind || 0,
-        trustScore: (a.trustScore === undefined ? -1 : a.trustScore),
+        trustBand: a.trustBand || "",
+        trustWhy: a.trustWhy || "",
         capabilities: a.capabilities || [],
         isGit: a.isGit === true,
         remote: a.remote || "",
@@ -1776,7 +1783,7 @@ Item {
         visible: !(rowData && rowData.official)
         width: Style.space(9); height: Style.space(9); radius: width / 2
         anchors.verticalCenter: parent.verticalCenter
-        color: rowData && rowData.trustScore >= 0 ? root.trustColor(rowData.trustScore) : root.fainter
+        color: rowData ? root.trustColor(rowData.trustBand) : root.fainter
       }
       Column {
         anchors.verticalCenter: parent.verticalCenter
@@ -1813,10 +1820,11 @@ Item {
               : rowData.official ? (rowData.kinds || "built-in")
               : rowData.updateAvailable ? (rowData.commitsBehind + " new change" + (rowData.commitsBehind === 1 ? "" : "s") + " · press update to review")
               : rowData.iconHidden ? "on · bar icon hidden"
-              // Said in words rather than counted into the dot. A plugin that
-              // needs a step you run yourself is worth knowing about, and it
-              // is not the same fact as "this plugin is risky".
-              : rowData.hasInstallScript ? (rowData.id + " · installs by hand")
+              // What the dot is about, in words. A colour on its own is the
+              // thing that made the old number useless — you could see that
+              // Plug disapproved and not what of. The id is the least useful
+              // line on the row, so it is what gives way.
+              : rowData.trustWhy ? rowData.trustWhy
               : (rowData.id + (rowData.kinds ? " · " + rowData.kinds : ""))
           textFormat: Text.PlainText
           color: confirming ? root.dangerColor : root.dim

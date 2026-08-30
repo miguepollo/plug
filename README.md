@@ -23,15 +23,32 @@ English, whether it is safe.
   part of Omarchy, not an installed copy, so there is nothing to update or
   remove).
 - **The trust dot** on each row is a quick capability read of the plugin's
-  source: what it can reach, run and write. It scores code that runs. Comments
-  are ignored, as is text the plugin displays, and a command quoted for you to
-  copy yourself counts far more lightly than one the plugin runs itself. A long
-  line counts as packed or encoded content only when nothing breaks it up. A
-  plugin's install script is weighed lightly too, and named in words on the row
-  instead — it is a step you take once, knowingly, after Plug has printed every
-  line of it for you, and scoring it like code the plugin runs would put every
-  plugin that needs a compiled daemon in the same colour as a genuinely alarming
-  one.
+  source — what it can reach, run and write — and it is one of three things,
+  never a number:
+  - 🟢 **Green — squeaky clean.** Nothing that leaves the machine, nothing
+    alarming even mentioned, no install step. It keeps to itself.
+  - 🔴 **Red — something obviously fishy.** Code that *actually runs* one of:
+    reading private files (`.ssh`, `id_rsa`, `.gnupg`, keyring, `/etc/shadow`),
+    escalating with `sudo`/`pkexec`/`doas`, hiding itself behind an encoder
+    (`atob`, `eval`, a packed line), or driving a package manager while the
+    shell is up. Red is meant to be rare. If it appears, read the code.
+  - 🟡 **Amber — the honest middle.** It reaches the network, or ships an
+    install step, or merely *displays* one of the above for you to copy. Most
+    useful plugins live here, and it is not an accusation.
+
+  **The row always says which.** "reaches the network", "installs by hand",
+  "shows you commands as root" — a colour you cannot account for is worse than
+  no colour, so the reason travels with it.
+
+  The distinction the bands turn on is *runs* versus *shows*: a plugin printing
+  `sudo systemctl enable …` on screen for you to copy is being helpful, and a
+  plugin running it is escalating. Comments are ignored entirely, and a long
+  line counts as packed content only when nothing breaks it up.
+
+  There was a 0–100 score here until 2026-08-30. It implied a precision this
+  scan has never had — nobody could say what 44 meant, the weights behind it
+  were invented, and it put a plugin that talks to earbuds below one that
+  clones strangers' repositories for a living.
 - **Review an update** — Plug fetches the exact changes, runs a fast offline
   scan, and hands the diff to your chosen AI reviewer (read-only). You get a
   **safe / be careful / do not** verdict, a plain-English summary of what
