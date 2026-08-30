@@ -92,6 +92,9 @@ Item {
   property color urgent: Color.urgent
   readonly property int cornerRadius: Style.cornerRadius
   property string fontFamily: Style.font.menuFamily
+  // Commands, and lines lifted out of a script, are shown at a fixed pitch so
+  // what you read is shaped like what you will paste.
+  property string monoFamily: "monospace"
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.6)
   readonly property color fainter: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.35)
   readonly property color hairline: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.14)
@@ -579,7 +582,11 @@ Item {
       if (repo) {
         root.lastApproved = { repo: repo, name: nm, sha: sha, id: pid,
                               candidate: c }
-        var args = ["install", repo + ".git", nm, sha, pid]
+        // A catalog address never carries the suffix; one typed in by hand
+        // often does, and appending a second made an address that resolves
+        // nowhere.
+        var args = ["install", String(repo).replace(/\.git$/, "") + ".git",
+                    nm, sha, pid]
         if (approvedVersion === true) args.push("--approved-version")
         root.runJob(args, "Installing " + nm + "…")
       }
@@ -731,6 +738,53 @@ Item {
     }
     Quickshell.execDetached(["xdg-open", u])
     root.noticeText = "Opened " + (c.name || u) + " in your browser"
+  }
+
+  // A repository that is not in the catalog, pasted in by hand. Plenty of
+  // plugins are never listed — a prize on omarchy.org, a link in a forum, a
+  // friend's repo — and those were the ones Plug could not read, which is
+  // backwards: an unlisted plugin has had less scrutiny, not more. The engine
+  // never needed the catalog for this (`inspect` has always taken an address
+  // and cloned it to a throwaway directory); what was missing was a way to
+  // reach it.
+  readonly property bool queryIsUrl: {
+    var q = root.storeQuery.trim()
+    return q.length > 0 && q.length <= 300 && root.repoUrlPattern.test(q)
+  }
+  function checkUrl(u) {
+    var url = String(u || "").trim().replace(/\/+$/, "")
+    if (url.length > 300 || !root.repoUrlPattern.test(url)) {
+      root.noticeText = "That is not a repository address Plug can read"
+      return
+    }
+    root.reviewMode = "install"
+    // Named from the address until the manifest says otherwise — the engine
+    // reads the real name out of the clone.
+    root.installCandidate = { repo: url, name: url.split("/").pop(),
+                              id: "", typed: true }
+    root.reviewId = root.installCandidate.name
+    root.reviewData = null
+    root.reviewRunning = true
+    inspectProc.command = ["python3", root.pluginDir + "/plugd.py", "inspect", url]
+    inspectProc.running = false; inspectProc.running = true
+  }
+  // The commands that finish a manual install, for the clipboard. Built from
+  // the plugin's own id and the script the scan actually found, so it is the
+  // real path rather than a worked example.
+  function manualCommands(d) {
+    if (!d) return ""
+    var repo = String(d.url || "")
+    var lines = ["omarchy plugin add " + repo + " --enable"]
+    var scripts = (d.manualInstall && d.manualInstall.scripts) || []
+    for (var i = 0; i < scripts.length; i++)
+      lines.push("~/.config/omarchy/plugins/" + String(d.id || "<plugin-id>")
+                 + "/" + String(scripts[i].file))
+    return lines.join("\n")
+  }
+  function copyText(s) {
+    if (!s) return
+    Quickshell.execDetached(["wl-copy", "--", String(s)])
+    root.noticeText = "Copied"
   }
 
   // Read it before it lands. plugd clones the plugin to a throwaway
@@ -925,8 +979,15 @@ Item {
         // Review overlay: Enter approves, Esc backs out.
         if (root.reviewId !== "") {
           if (e.key === Qt.Key_Escape) { root.cancelReview(); e.accepted = true }
+          // Enter approves what there is to approve. Where the install needs
+          // a script Plug will not run, there is no approving it from here —
+          // and an Enter that silently half-installed it would be worse than
+          // one that does nothing.
           else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter)
-                   && root.reviewData && !root.reviewRunning) { root.approveUpdate(); e.accepted = true }
+                   && root.reviewData && !root.reviewRunning
+                   && !(root.reviewData.manualInstall
+                        && root.reviewData.manualInstall.required === true)
+                   && root.reviewData.isPlugin !== false) { root.approveUpdate(); e.accepted = true }
           return
         }
         // Escape unwinds one layer at a time, then closes.
@@ -1300,7 +1361,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     width: parent.width
                     visible: root.storeQuery === ""
-                    text: "Search community plugins…"
+                    text: "Search community plugins, or paste a repository URL…"
                     textFormat: Text.PlainText
                     color: root.fainter
                     font.family: root.fontFamily
@@ -1361,6 +1422,59 @@ Item {
               }
             }
 
+            // A pasted address searches nothing — no catalog entry has a URL
+            // in its name — so the field would otherwise go empty and read as
+            // "no such plugin". This is the one row that address does match.
+            Rectangle {
+              id: urlBanner
+              width: parent.width
+              visible: root.queryIsUrl
+              height: visible ? urlRow.implicitHeight + Style.space(20) : 0
+              radius: root.cornerRadius
+              color: root.selBg
+              border.color: root.accent
+              border.width: 1
+              Row {
+                id: urlRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: Style.space(12)
+                anchors.rightMargin: Style.space(12)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(10)
+                Column {
+                  width: parent.width - checkBtn.width - Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(2)
+                  Text {
+                    width: parent.width
+                    text: "Not in the catalog"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
+                  Text {
+                    width: parent.width
+                    text: "Read this repository before you install it — same "
+                        + "check the Store does, on an address you typed."
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+                PlugButton {
+                  id: checkBtn
+                  anchors.verticalCenter: parent.verticalCenter
+                  label: "Check it"
+                  onPicked: root.checkUrl(root.storeQuery)
+                }
+              }
+            }
+
             // A list that builds the rows it is showing, not the whole
             // catalog. The old column made every row a live object up front,
             // which is why it had to stop at 300 — a bound on what could be
@@ -1371,7 +1485,11 @@ Item {
             // fixed height, so the scrollbar needs no guesswork.
             Item {
               width: parent.width
+              // The search box and its spacing, plus the pasted-address row
+              // when it is showing — a Column does not take height back from
+              // a sibling on its own.
               height: parent.height - Style.space(40)
+                      - (urlBanner.visible ? urlBanner.height + Style.space(8) : 0)
               ListView {
                 id: storeList
                 anchors.fill: parent
@@ -1411,8 +1529,12 @@ Item {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             text: root.noticeText !== "" ? root.noticeText
-                : root.reviewId !== "" ? (root.reviewMode === "install"
-                    ? "Enter install · Esc cancel" : "Enter apply · Esc back")
+                : root.reviewId !== "" ? (
+                    (root.reviewData && root.reviewData.manualInstall
+                     && root.reviewData.manualInstall.required === true)
+                      ? "Esc cancel — this one you install yourself"
+                    : root.reviewMode === "install"
+                      ? "Enter install · Esc cancel" : "Enter apply · Esc back")
                 : root.tab === "installed" ? "↑↓ move · Enter review/toggle · x remove · Tab switch view · Esc close"
                 : root.tab === "store" ? "type to search · double-click a plugin to open its repo · Tab switch view · Esc clear/close"
                 : "Tab switch view · Esc close"
@@ -1936,8 +2058,16 @@ Item {
         }
 
         // The author's own words for the change, next to the AI's read.
+        //
+        // Coerced to a real boolean, because there is no changelog on an
+        // install: `reviewData.changelog` is then undefined, the whole
+        // expression evaluates to undefined rather than false, and assigning
+        // that to `visible` left the heading on screen with nothing under it.
+        // It read as a plugin whose author had written release notes that
+        // Plug had failed to fetch.
         Text {
-          visible: root.reviewData && root.reviewData.changelog && root.reviewData.changelog.length > 0
+          visible: !!(root.reviewData && root.reviewData.changelog
+                      && root.reviewData.changelog.length > 0)
           text: "The author's notes"
           textFormat: Text.PlainText
           color: root.dim
@@ -1946,7 +2076,8 @@ Item {
           font.bold: true
         }
         Column {
-          visible: root.reviewData && root.reviewData.changelog && root.reviewData.changelog.length > 0
+          visible: !!(root.reviewData && root.reviewData.changelog
+                      && root.reviewData.changelog.length > 0)
           width: parent.width
           spacing: Style.space(2)
           Repeater {
@@ -1963,11 +2094,111 @@ Item {
           }
         }
 
+        // A repository with no manifest is not a plugin, and `omarchy plugin
+        // add` would refuse it. Saying that is more use than a verdict on
+        // code that could never have been installed.
+        Text {
+          visible: root.reviewData && root.reviewData.isPlugin === false
+          width: card.width - Style.space(60)
+          text: "This repository has no manifest.json, so it is not an Omarchy "
+              + "plugin and cannot be installed as one. The review above is "
+              + "still a read of its code."
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: root.warnColor
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        // The install Plug will not do for you. Cloning a repository runs
+        // nothing in it, so a plugin needing packages, a build or a service
+        // ships a script and expects you to run it — and that script runs as
+        // you, immediately, before a line of the plugin's own code loads.
+        // Reviewing code and then executing it is the one thing this plugin
+        // exists not to do, so it reads the script, says what it would do,
+        // and hands the commands back.
+        Column {
+          id: manualBlock
+          readonly property var mi: root.reviewData ? root.reviewData.manualInstall : null
+          readonly property var scripts: mi && mi.scripts ? mi.scripts : []
+          visible: mi && mi.required === true
+          width: parent.width
+          spacing: Style.space(6)
+
+          Text {
+            text: "Manual installation required"
+            textFormat: Text.PlainText
+            color: root.warnColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+          Text {
+            width: card.width - Style.space(60)
+            text: "Adding this plugin only copies its files. It ships a script "
+                + "that finishes the install, which Plug will not run for you "
+                + "— run it yourself once you have read what it does."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+          Repeater {
+            model: manualBlock.scripts
+            delegate: Column {
+              width: card.width - Style.space(60)
+              spacing: Style.space(2)
+              Text {
+                text: modelData.file + "  ·  " + modelData.lines + " lines"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+              Repeater {
+                model: modelData.steps || []
+                delegate: Text {
+                  width: card.width - Style.space(72)
+                  // Straight from the script, in the order it runs. Plain
+                  // text, like everything else that came out of a stranger's
+                  // repository.
+                  text: "    " + modelData.text
+                        + (modelData.quotedOnly ? "   (quoted, not run)" : "")
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WrapAnywhere
+                  color: root.dim
+                  font.family: root.monoFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+          }
+          Text {
+            width: card.width - Style.space(60)
+            text: root.manualCommands(root.reviewData)
+            textFormat: Text.PlainText
+            wrapMode: Text.WrapAnywhere
+            color: root.foreground
+            font.family: root.monoFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
         Row {
           spacing: Style.space(8)
+          readonly property bool manual: root.reviewData && root.reviewData.manualInstall
+                                         && root.reviewData.manualInstall.required === true
+          readonly property bool notAPlugin: root.reviewData
+                                             && root.reviewData.isPlugin === false
           PlugButton {
             readonly property bool refused: root.reviewData && root.reviewData.review
                                             && root.reviewData.review.verdict === "DANGER"
+            // Plug installs what a clone alone completes. Where a script has
+            // to run afterwards, the honest button is the one that gives you
+            // the commands, not one that half-installs it and says nothing.
+            visible: !parent.manual && !parent.notAPlugin
             label: root.reviewMode !== "install"
                  ? (refused ? "Apply anyway" : "Apply update")
                  : (refused ? "Install anyway" : "Install")
@@ -1976,6 +2207,17 @@ Item {
             // styling, with Enter applying it unremarked.
             danger: refused
             onPicked: root.approveUpdate()
+          }
+          PlugButton {
+            visible: parent.manual
+            label: "Copy the commands"
+            onPicked: root.copyText(root.manualCommands(root.reviewData))
+          }
+          PlugButton {
+            visible: parent.manual || parent.notAPlugin
+            label: "Open repository"
+            onPicked: root.openRepo({ repo: root.reviewData ? root.reviewData.url : "",
+                                      name: root.reviewData ? root.reviewData.name : "" })
           }
           PlugButton { label: root.reviewMode === "install" ? "Cancel" : "Not now"; onPicked: root.cancelReview() }
         }

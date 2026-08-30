@@ -46,6 +46,19 @@ English, whether it is safe.
   deleted either way, and nothing in it is ever run. Double-click a row to open
   the plugin's own repository page. Omarchy's built-in plugins appear here too,
   marked **OFFICIAL** and shown for discovery only.
+- **Any repository, listed or not** — paste a GitHub address into the Store's
+  search box and Plug offers to read that, exactly the way it reads a catalog
+  entry. Plenty of plugins are never listed — a link in a forum, a friend's
+  repo — and those are the ones that have had the least scrutiny, so they are
+  the ones most worth reading first.
+- **Manual installs** — adding a plugin only copies its files and enables it;
+  it builds nothing and starts nothing. A plugin that needs packages, a
+  compiled daemon or a service therefore ships a script and expects you to run
+  it, and that script runs as you the moment you start it, before any of the
+  plugin's own code loads. Plug finds that script, reads it, lists what it
+  would do to your machine, and hands you the commands — it will not run it
+  for you. Reviewing code and then executing it is the one thing this plugin
+  exists not to do.
 
 ## Choosing your reviewer
 
@@ -144,9 +157,11 @@ ping` / `summon` to bring Plug back afterwards with the result;
 `omarchy plugin add` / `remove` (install/uninstall on your click); `git` inside each plugin's checkout (read its
 state, fetch updates, show the diff, apply or revert); `hyprctl binds` (read
 active shortcuts) and `hyprctl reload` (after a hotkey change); `python3` (Plug's
-own engine); `bash` (Plug's own `plug-ctl.sh`); and the AI reviewer you chose —
-either its command (`claude` / `codex` / `gemini`) or a request to a local
-server on `localhost`.
+own engine); `bash` (Plug's own `plug-ctl.sh`); `wl-copy` (only when you press
+**Copy the commands** on a manual install, with the commands passed as an
+argument rather than through a shell); `xdg-open` (only when you open a
+plugin's repository page); and the AI reviewer you chose — either its command
+(`claude` / `codex` / `gemini`) or a request to a local server on `localhost`.
 
 **Network:** each installed plugin's git remote, to check for and fetch updates;
 the repository of a store plugin you ask Plug to check before installing;
@@ -205,6 +220,11 @@ shell process that stays up for days, so all of it is treated as data:
 - A plugin you ask Plug to check before installing is cloned shallow into a
   throwaway directory, read, and deleted — whether the check succeeds or not.
   Nothing in it is executed at any point.
+- Source files are picked by what they are, not by what they are called. A
+  script carrying no extension is opened far enough to read its shebang and
+  then read as that language, because the file that does the most to your
+  machine is usually the one named plainly `setup`. The peek is a fixed 128
+  bytes and the number of peeks is capped.
 
 ## Maintenance
 
