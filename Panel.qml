@@ -2391,7 +2391,12 @@ Item {
                 if (root.availableAgents[i].key === "opencode") return root.availableAgents[i]
               return null
             }
-            property bool hasModels: oc && oc.models && oc.models.length > 0
+            property bool hasModels: !!(oc && oc.models && oc.models.length > 0)
+            // Whether setup has actually run is the cache timestamp, not the
+            // length of the list: the model configured in opencode itself is
+            // offered before any discovery, so a non-empty list is not
+            // evidence that anything was fetched.
+            property bool hasCache: !!(oc && oc.cachedAt)
             Text {
               width: card.width - Style.space(60)
               wrapMode: Text.WordWrap
@@ -2401,16 +2406,18 @@ Item {
               font.pixelSize: Style.font.caption
               text: {
                 if (!oc) return "Opencode not installed — install the `opencode` command to use it."
-                if (hasModels) {
+                if (hasCache) {
                   var at = oc.cachedAt || ""
                   var when = at ? at.slice(0,19).replace("T"," ") : ""
                   return when ? "Models cached " + when + " — Refresh re-runs discovery." : "Models cached — Refresh re-runs discovery."
                 }
+                if (hasModels)
+                  return "Offering the model you have configured in opencode. Set up to see the rest of what it can reach."
                 return "Opencode needs explicit setup before its model list appears. Nothing has run yet and nothing has left this machine."
               }
             }
             Text {
-              visible: !!(oc && !hasModels)
+              visible: !!(oc && !hasCache)
               width: card.width - Style.space(60)
               wrapMode: Text.WordWrap
               textFormat: Text.PlainText
@@ -2422,12 +2429,12 @@ Item {
             Row {
               spacing: Style.space(8)
               PlugButton {
-                visible: !!(oc && !hasModels)
+                visible: !!(oc && !hasCache)
                 label: root.opencodeDiscovering ? "asking opencode…" : "Set up Opencode — find available models"
                 onPicked: if (!root.opencodeDiscovering) root.discoverOpencode()
               }
               PlugButton {
-                visible: !!(oc && hasModels)
+                visible: !!(oc && hasCache)
                 label: root.opencodeDiscovering ? "Refreshing…" : "Refresh models"
                 onPicked: if (!root.opencodeDiscovering) root.discoverOpencode()
               }
@@ -2442,7 +2449,7 @@ Item {
               }
             }
             Text {
-              visible: !!(hasModels && oc && oc.models.length > 0)
+              visible: !!(hasCache && oc && oc.models.length > 0)
               width: card.width - Style.space(60)
               text: oc ? oc.models.length + " models cached" + (oc.cachedAt ? " · " + oc.cachedAt.slice(0,10) : "") : ""
               textFormat: Text.PlainText

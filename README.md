@@ -121,7 +121,8 @@ tools you actually have:
 > a button you press rather than something that happens around you.
 >
 > Opening **Settings** runs `which opencode`, exactly as it does for Claude,
-> Codex and Gemini. Opencode then appears with an empty model list and a **Set
+> Codex and Gemini, and reads your opencode configuration so the model you have
+> already chosen there is the one offered. Opencode then appears with a **Set
 > up Opencode** button describing what pressing it will do.
 >
 > Pressing it runs `opencode models`, plus `opencode models <provider>` for
@@ -208,7 +209,8 @@ model list, written only when you press **Set up Opencode** / **Refresh models**
 | `~/.config/hypr/bindings.lua` | only when you set or clear a hotkey, and only Plug's own marked block, between `-- >>> plug hotkey` and `-- <<< plug hotkey`, along with the blank line it writes above that block. Resolved the same way if it is a dotfiles symlink |
 | `~/.config/omarchy/shell.json` | only when you show or hide the bar icon. It adds, moves or removes its own `{"id": …}` entry and leaves every other setting as it found it, though the file is rewritten as standard JSON with two-space indentation. Where a dotfiles manager has symlinked this path into its own repository, the link is resolved and the real file written, so the link survives |
 | a plugin's own checkout under `~/.config/omarchy/plugins/…` | standard git operations (`fetch`, fast-forward, and `reset` for a revert) when you update or roll back **that** plugin |
-| `~/.config/opencode/opencode.json` / `opencode.jsonc` and `~/.local/share/opencode/auth.json` | only when you press **Set up Opencode** / **Refresh models** and `opencode` is installed — to discover the configured default model, decide which provider probes to run, and run the probes (each read capped at 64 KB, JSONC-tolerant for `jsonc`); the reviewer list built on each Settings open reads the same two files to settle your configured default model, which is a local read that completes immediately |
+| `~/.config/opencode/opencode.json` / `opencode.jsonc` | whenever the reviewer list is built — which includes opening Settings — and again when you press **Set up Opencode** / **Refresh models**, to pick up the model you have configured in opencode so it is the one offered and used. A local read, capped at 64 KB, and the `jsonc` form may carry comments |
+| `~/.local/share/opencode/auth.json` | only when you press **Set up Opencode** / **Refresh models**, read to see which providers you have set up so only those are probed. Capped at 64 KB, and only the names of the top-level entries are looked at |
 | `~/.local/state/plug/opencode_models.json` | written only when you press **Set up Opencode** / **Refresh models** (the cached model list, with `fetchedAt`); read back locally each time the reviewer list is built |
 | a temporary directory | a shallow clone of a plugin you asked Plug to check before installing, read and then deleted |
 
