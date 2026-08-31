@@ -115,21 +115,30 @@ tools you actually have:
   request to `localhost`, so **nothing leaves your machine** — a real LLM review
   that is completely private. Their loaded models are listed automatically.
 
-> **Opencode model discovery — explicit opt-in.** Opening **Settings** does
-> **not** run `opencode models`. Opencode appears (if its command is installed)
-> with an empty model list and a **Set up Opencode** button — `which opencode`
-> only, exactly like Claude/Codex/Gemini, no probe and no network. Pressing
-> **Set up Opencode** runs `opencode models` (plus `opencode models <provider>`
-> for `anthropic`/`openai`/`google` always, others like `openrouter`/`mistral`
-> only when env or `~/.local/share/opencode/auth.json` suggests they are
-> configured) with the trimmed per-provider environment above. It may spawn up
-> to ~11 short-lived `opencode` processes (each 6 s timeout, stdout capped at
-> 512 KB, 100 models per provider / 300 total) and, for providers that need
-> credentials, may make authenticated network requests. Measured ~13 s for the
-> three unconditional providers with no credentials. The result is cached to
-> Plug's own state (`opencode_models.json`) and shown with a **Refresh models**
-> button — cost is paid once on request, not every shell startup or Settings
-> open.
+> **Setting up Opencode.** Every other reviewer's models are known here in
+> advance, or come from a server on your own machine. Opencode's live on its
+> servers, so Plug has to ask — and asking leaves your machine, which makes it
+> a button you press rather than something that happens around you.
+>
+> Opening **Settings** runs `which opencode`, exactly as it does for Claude,
+> Codex and Gemini. Opencode then appears with an empty model list and a **Set
+> up Opencode** button describing what pressing it will do.
+>
+> Pressing it runs `opencode models`, plus `opencode models <provider>` for
+> `anthropic`, `openai` and `google` every time, and for others such as
+> `openrouter` or `mistral` when either the environment or
+> `~/.local/share/opencode/auth.json` shows they are set up. That is up to
+> eleven short-lived `opencode` processes, each given six seconds, each with
+> its output capped at 512 KB, each carrying only that provider's own
+> environment as described above, and the list bounded at 100 models per
+> provider and 300 in total. They reach Opencode and those providers over the
+> network, and where a provider has credentials stored the request carries
+> them. Measured at roughly 13 seconds for the three unconditional providers.
+>
+> Plug writes the answer to `~/.local/state/plug/opencode_models.json` and
+> builds the picker from that file afterwards, so the cost is paid on the
+> press. A **Refresh models** button in the same place repeats it whenever you
+> want a newer list.
 - **Just the offline scan** — no AI at all; Plug reports what its own capability
   scan found. Everything stays local.
 
@@ -197,8 +206,8 @@ model list, written only when you press **Set up Opencode** / **Refresh models**
 | `~/.config/hypr/bindings.lua` | only when you set or clear a hotkey, and only Plug's own marked block, between `-- >>> plug hotkey` and `-- <<< plug hotkey`, along with the blank line it writes above that block. Resolved the same way if it is a dotfiles symlink |
 | `~/.config/omarchy/shell.json` | only when you show or hide the bar icon. It adds, moves or removes its own `{"id": …}` entry and leaves every other setting as it found it, though the file is rewritten as standard JSON with two-space indentation. Where a dotfiles manager has symlinked this path into its own repository, the link is resolved and the real file written, so the link survives |
 | a plugin's own checkout under `~/.config/omarchy/plugins/…` | standard git operations (`fetch`, fast-forward, and `reset` for a revert) when you update or roll back **that** plugin |
-| `~/.config/opencode/opencode.json` / `opencode.jsonc` and `~/.local/share/opencode/auth.json` | only when you press **Set up Opencode** / **Refresh models** and `opencode` is installed — to discover the configured default model, decide which provider probes to run, and run the probes (each read capped at 64 KB, JSONC-tolerant for `jsonc`); `available_agents` after that also reads the same files cheaply to settle the default model, but no probe runs without the button |
-| `~/.local/state/plug/opencode_models.json` | only when you press **Set up Opencode** / **Refresh models** (cached model list with `fetchedAt`); read on Settings open via `which`-only `agents` (no network) |
+| `~/.config/opencode/opencode.json` / `opencode.jsonc` and `~/.local/share/opencode/auth.json` | only when you press **Set up Opencode** / **Refresh models** and `opencode` is installed — to discover the configured default model, decide which provider probes to run, and run the probes (each read capped at 64 KB, JSONC-tolerant for `jsonc`); the reviewer list built on each Settings open reads the same two files to settle your configured default model, which is a local read that completes immediately |
+| `~/.local/state/plug/opencode_models.json` | written only when you press **Set up Opencode** / **Refresh models** (the cached model list, with `fetchedAt`); read back locally each time the reviewer list is built |
 | a temporary directory | a shallow clone of a plugin you asked Plug to check before installing, read and then deleted |
 
 **Commands it runs:** `omarchy-shell shell listPlugins` / `listShellConfig` /
@@ -318,5 +327,7 @@ An AI reviewer is optional — without one, Plug uses its offline scan.
 MIT — see [LICENSE](LICENSE).
 
 ## Credits
+
+Opencode support was contributed by [miguepollo](https://github.com/miguepollo).
 
 Built with [Claude Code](https://claude.com/claude-code).

@@ -187,6 +187,14 @@ Item {
   property var availableAgents: []
   property bool settingsLoaded: false
 
+  // A review belongs to the tab it was started from, and Settings is a
+  // legitimate place to go while one is waiting — checking which reviewer is
+  // configured before approving is exactly the kind of thing you want to be
+  // able to do. So on Settings the overlay steps aside and comes back when you
+  // leave, rather than painting on top of the settings and leaving Enter bound
+  // to an install nobody can see.
+  readonly property bool reviewOnScreen: root.reviewId !== "" && root.tab !== "settings"
+
   // Update count drives the header badge and the bar widget badge.
   readonly property int updateCount: {
     var n = 0
@@ -1018,8 +1026,10 @@ Item {
           e.accepted = true
           return
         }
-        // Review overlay: Enter approves, Esc backs out.
-        if (root.reviewId !== "") {
+        // Review overlay: Enter approves, Esc backs out. Gated on the overlay
+        // being visible, so Enter on the Settings tab cannot approve an
+        // install that is not on screen.
+        if (root.reviewOnScreen) {
           if (e.key === Qt.Key_Escape) { root.cancelReview(); e.accepted = true }
           // Enter approves what there is to approve. Where the install needs
           // a script Plug will not run, there is no approving it from here —
@@ -1274,7 +1284,7 @@ Item {
 
           // ===== REVIEW OVERLAY =====
           ReviewView {
-            visible: root.reviewId !== ""
+            visible: root.reviewOnScreen
             anchors.fill: parent
           }
 
@@ -1571,7 +1581,7 @@ Item {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
             text: root.noticeText !== "" ? root.noticeText
-                : root.reviewId !== "" ? (
+                : root.reviewOnScreen ? (
                     (root.reviewData && root.reviewData.manualInstall
                      && root.reviewData.manualInstall.required === true)
                       ? "Esc cancel — this one you install yourself"
@@ -2314,15 +2324,21 @@ Item {
               }
             }
           }
-          // model, when the chosen agent has choices
-          Row {
+          // model, when the chosen agent has choices. A Flow rather than a Row
+          // because a provider-qualified name — opencode/muse-spark-1.2-… — is
+          // several times the width of `sonnet`, and six of them run off the
+          // panel in a Row with the last one sliced in half at the edge.
+          Flow {
+            width: parent.width
             visible: {
               for (var i = 0; i < root.availableAgents.length; i++)
                 if (root.availableAgents[i].key === root.settings.reviewAgent) return root.availableAgents[i].models.length > 1
               return false
             }
             spacing: Style.space(6)
-            Text { text: "model:"; textFormat: Text.PlainText; color: root.dim; anchors.verticalCenter: parent.verticalCenter; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            // A positioner sets its children's y, so this label carries its own
+            // height and centres the text inside it rather than anchoring.
+            Text { text: "model:"; textFormat: Text.PlainText; color: root.dim; height: Style.space(24); verticalAlignment: Text.AlignVCenter; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
             Repeater {
               model: {
                 for (var i = 0; i < root.availableAgents.length; i++)
@@ -2373,7 +2389,7 @@ Item {
               }
             }
             Text {
-              visible: oc && !hasModels
+              visible: !!(oc && !hasModels)
               width: card.width - Style.space(60)
               wrapMode: Text.WordWrap
               textFormat: Text.PlainText
@@ -2385,12 +2401,12 @@ Item {
             Row {
               spacing: Style.space(8)
               PlugButton {
-                visible: oc && !hasModels
+                visible: !!(oc && !hasModels)
                 label: root.opencodeDiscovering ? "Discovering… (~13 s)" : "Set up Opencode — discover models (~10–15 s)"
                 onPicked: if (!root.opencodeDiscovering) root.discoverOpencode()
               }
               PlugButton {
-                visible: oc && hasModels
+                visible: !!(oc && hasModels)
                 label: root.opencodeDiscovering ? "Refreshing…" : "Refresh models"
                 onPicked: if (!root.opencodeDiscovering) root.discoverOpencode()
               }
@@ -2405,7 +2421,7 @@ Item {
               }
             }
             Text {
-              visible: hasModels && oc && oc.models.length > 0
+              visible: !!(hasModels && oc && oc.models.length > 0)
               width: card.width - Style.space(60)
               text: oc ? oc.models.length + " models cached" + (oc.cachedAt ? " · " + oc.cachedAt.slice(0,10) : "") : ""
               textFormat: Text.PlainText
