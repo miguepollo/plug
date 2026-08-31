@@ -870,6 +870,18 @@ Item {
         try {
           var a = JSON.parse(text)
           if (Array.isArray(a)) root.availableAgents = a
+          // Choosing Opencode before setting it up leaves no model selected,
+          // and an empty reviewModel falls through to the engine's hard-coded
+          // default rather than the one just discovered. Take it once, here,
+          // where the refreshed list actually arrives.
+          if (root.applyOpencodeDefault) {
+            root.applyOpencodeDefault = false
+            if (root.settings.reviewAgent === "opencode" && !root.settings.reviewModel)
+              for (var i = 0; i < root.availableAgents.length; i++)
+                if (root.availableAgents[i].key === "opencode"
+                    && root.availableAgents[i].defaultModel)
+                  root.setModel(root.availableAgents[i].defaultModel)
+          }
         } catch (e) {}
       }
     }
@@ -878,6 +890,8 @@ Item {
   // probes) which may take ~13 s and contact providers; result is cached to
   // Plug's own state so the cost is paid once, not every boot.
   property bool opencodeDiscovering: false
+  // set when a discovery succeeds, consumed by the agents reload it triggers
+  property bool applyOpencodeDefault: false
   function discoverOpencode() {
     if (root.opencodeDiscovering) return
     root.opencodeDiscovering = true
@@ -896,6 +910,7 @@ Item {
         var d = JSON.parse(opencodeDiscoverOut.text)
         if (d.ok) {
           root.noticeText = "Opencode models updated — " + d.count + " models"
+          root.applyOpencodeDefault = true
           agentsProc.running = false; agentsProc.running = true
         } else {
           root.noticeText = "Opencode setup failed: " + (d.error || "unknown error")
@@ -1044,7 +1059,12 @@ Item {
         }
         // Escape unwinds one layer at a time, then closes.
         if (e.key === Qt.Key_Escape) {
-          if (root.confirmRemoveId !== "") root.confirmRemoveId = ""
+          // A review waiting on another tab is a layer too. Going to Settings
+          // to check the reviewer and pressing Escape should return to the
+          // verdict, not close the panel and discard it on the way back in.
+          if (root.reviewId !== "" && root.tab === "settings")
+            root.tab = (root.reviewMode === "install" ? "store" : "installed")
+          else if (root.confirmRemoveId !== "") root.confirmRemoveId = ""
           else if (root.tab === "store" && root.storeQuery !== "") root.storeQuery = ""
           else root.close()
           e.accepted = true; return

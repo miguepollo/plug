@@ -981,13 +981,16 @@ def opencode_cli_models(spec):
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 env=env,
             )
-            # Cap stdout while reading, not after, so a huge reply cannot be
-            # held whole. Reuse the same ceiling as agent replies.
-            capper = subprocess.Popen(
-                ["head", "-c", str(MAX_AGENT_BYTES)],
-                stdin=proc.stdout, stdout=subprocess.PIPE)
-            proc.stdout.close()
             try:
+                # Cap stdout while reading, not after, so a huge reply cannot
+                # be held whole. Reuse the same ceiling as agent replies. This
+                # spawn lives inside the try because if it raises, the finally
+                # below is what stops opencode being left running with its
+                # pipe open inside a shell process that stays up for days.
+                capper = subprocess.Popen(
+                    ["head", "-c", str(MAX_AGENT_BYTES)],
+                    stdin=proc.stdout, stdout=subprocess.PIPE)
+                proc.stdout.close()
                 out, _ = capper.communicate(timeout=6)
             except subprocess.TimeoutExpired:
                 capper.kill()
@@ -1066,8 +1069,9 @@ def opencode_cli_models(spec):
                     if m not in seen:
                         models.append(m)
                         seen.add(m)
-        if not models:
-            return list(spec.get("models") or [])
+        # An opencode that ran and listed nothing has told us something true.
+        # Substituting the hard-coded Zen list here would cache models the user
+        # may have no access to and report it as a successful setup.
         return models[:300]
     except Exception:
         return None
@@ -1105,7 +1109,10 @@ def available_agents():
             if key == "opencode":
                 # No network here — which only, like claude/codex/gemini.
                 # Cached models, if any, are read from Plug's own state.
-                cached = read_json(OPENCODE_CACHE_FILE, 64 * 1024, None)
+                # Read with the ceiling the writer can actually reach: 300 entries
+                # of arbitrary length will not fit in 64 KB, and a cache
+                # over the ceiling reads as absent, which strands setup.
+                cached = read_json(OPENCODE_CACHE_FILE, MAX_AGENT_BYTES, None)
                 models = []
                 cached_at = ""
                 if isinstance(cached, dict) and isinstance(cached.get("models"), list):
@@ -1114,31 +1121,35 @@ def available_agents():
                     v = cached.get("fetchedAt")
                     if isinstance(v, str):
                         cached_at = v
-                # Only merge the user's configured default when we actually have
-                # a cached list; otherwise keep the list empty so Settings can
-                # show the explicit Set up button instead of hanging.
-                if models:
-                    configured = ""
-                    for cfg_path in (
-                        os.path.join(HOME, ".config/opencode/opencode.json"),
-                        os.path.join(HOME, ".config/opencode/opencode.jsonc"),
-                    ):
-                        cfg = _load_opencode_config(cfg_path, 64 * 1024)
-                        if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
-                            configured = cfg["model"].strip()
-                            if configured:
-                                break
-                    if not configured:
-                        configured = os.environ.get("OPENCODE_MODEL", "").strip()
-                    if configured:
-                        if configured not in models:
-                            models = [configured] + models
-                            if len(models) > 300:
-                                models = models[:300]
-                        default = configured
-                    else:
-                        dm = spec.get("default_model", "")
-                        default = dm if dm in models else (models[0] if models else dm)
+                # The model the user has already chosen in opencode's own
+                # configuration is read whether or not discovery has run. It is
+                # two local file reads, and skipping them before discovery is
+                # what made a non-Zen user fall back to a hard-coded Zen model
+                # with their provider credentials trimmed away — the very case
+                # the earlier commit here set out to fix.
+                configured = ""
+                for cfg_path in (
+                    os.path.join(HOME, ".config/opencode/opencode.json"),
+                    os.path.join(HOME, ".config/opencode/opencode.jsonc"),
+                ):
+                    cfg = _load_opencode_config(cfg_path, 64 * 1024)
+                    if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
+                        configured = cfg["model"].strip()
+                        if configured:
+                            break
+                if not configured:
+                    configured = os.environ.get("OPENCODE_MODEL", "").strip()
+                if configured:
+                    # Offer it even with nothing cached: it is the model the
+                    # user has actually set up, so it is the one that works.
+                    if configured not in models:
+                        models = [configured] + models
+                        if len(models) > 300:
+                            models = models[:300]
+                    default = configured
+                elif models:
+                    dm = spec.get("default_model", "")
+                    default = dm if dm in models else models[0]
                 else:
                     default = ""
                 entry = {"key": key, "label": spec["label"], "models": models,
