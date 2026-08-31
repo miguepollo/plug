@@ -106,10 +106,25 @@ tools you actually have:
     mode (read-only, denies edits). Like Codex it keeps read-capable tooling,
     so what contains it is the empty working directory and the read-only plan
     sandbox. Supports any provider configured in opencode (Zen models work out
-    of the box with `opencode auth`).
+    of the box with `opencode auth`). Its environment is trimmed per-model:
+    `opencode/*` receives only `OPENCODE_`, `anthropic/*` only `OPENCODE_` +
+    `ANTHROPIC_`, `openai/*` only `OPENCODE_` + `OPENAI_`, and an unknown
+    provider only `OPENCODE_` — so e.g. `AWS_SECRET_ACCESS_KEY` never reaches
+    an opencode process that does not need it.
 - **Local servers** — Ollama or LM Studio, if they are running. The review is a
   request to `localhost`, so **nothing leaves your machine** — a real LLM review
   that is completely private. Their loaded models are listed automatically.
+
+> **Opencode model discovery.** Opening **Settings** runs `opencode models` to
+> list available models live, so the picker is never stale. If the base list
+> is empty or only `opencode/*`, Plug also tries `opencode models <provider>`
+> for a few providers (`anthropic`/`openai`/`google` always; others like
+> `openrouter`/`mistral` only when env or `~/.local/share/opencode/auth.json`
+> suggests they are configured). This happens without starting a review, may
+> spawn up to ~11 short-lived `opencode` processes (each 6 s timeout, stdout
+> capped at 512 KB), and for providers that need credentials it runs with the
+> trimmed per-provider environment above — it can trigger authenticated network
+> requests to those providers.
 - **Just the offline scan** — no AI at all; Plug reports what its own capability
   scan found. Everything stays local.
 
@@ -176,6 +191,7 @@ version each applied update came from).
 | `~/.config/hypr/bindings.lua` | only when you set or clear a hotkey, and only Plug's own marked block, between `-- >>> plug hotkey` and `-- <<< plug hotkey`, along with the blank line it writes above that block. Resolved the same way if it is a dotfiles symlink |
 | `~/.config/omarchy/shell.json` | only when you show or hide the bar icon. It adds, moves or removes its own `{"id": …}` entry and leaves every other setting as it found it, though the file is rewritten as standard JSON with two-space indentation. Where a dotfiles manager has symlinked this path into its own repository, the link is resolved and the real file written, so the link survives |
 | a plugin's own checkout under `~/.config/omarchy/plugins/…` | standard git operations (`fetch`, fast-forward, and `reset` for a revert) when you update or roll back **that** plugin |
+| `~/.config/opencode/opencode.json` / `opencode.jsonc` and `~/.local/share/opencode/auth.json` | only when you open Settings and `opencode` is installed, to discover the configured default model and which providers have credentials (read capped at 64 KB, JSONC-tolerant for `jsonc`) |
 | a temporary directory | a shallow clone of a plugin you asked Plug to check before installing, read and then deleted |
 
 **Commands it runs:** `omarchy-shell shell listPlugins` / `listShellConfig` /
@@ -191,11 +207,16 @@ own engine); `bash` (Plug's own `plug-ctl.sh`); `wl-copy` (only when you press
 argument rather than through a shell); `xdg-open` (only when you open a
 plugin's repository page); and the AI reviewer you chose — either its command
 (`claude` / `codex` / `gemini` / `opencode`) or a request to a local server on `localhost`.
+When you open **Settings** and `opencode` is installed, Plug also runs
+`opencode models` (plus `opencode models <provider>` for a few providers, see
+above) to discover models — without starting a review.
 
 **Network:** each installed plugin's git remote, to check for and fetch updates;
 the repository of a store plugin you ask Plug to check before installing;
-the marketplace catalog on `raw.githubusercontent.com`; and, when you review an
-update with a cloud agent, that provider — never otherwise. A local-server
+the marketplace catalog on `raw.githubusercontent.com`; when you review an
+update with a cloud agent, that provider — never otherwise; and, when you open
+Settings with Opencode installed, the `opencode models` discovery described
+above (which may contact configured providers). A local-server
 reviewer stays on `localhost`.
 
 **When the catalog is fetched.** Starting the shell never fetches it — Plug

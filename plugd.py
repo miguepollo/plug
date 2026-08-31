@@ -962,23 +962,45 @@ def opencode_cli_models(spec):
     """Ask the opencode CLI what models it knows. Returns None if opencode
     is not usable, otherwise a list (possibly empty). Tries `opencode models`
     so Zen and provider models stay current without hard-coding.
-    Si tu default no es Zen (ej. anthropic/claude-*, openai/gpt-*),
-    `opencode models` sin filtro solo lista opencode/*; por eso se
-    intenta también listar por provider cuando hay credenciales."""
-    def _run_models(args):
+    If your default is not Zen (e.g. anthropic/claude-*, openai/gpt-*),
+    `opencode models` without a filter only lists opencode/*; so
+    provider-specific listings are also tried when credentials are present."""
+    def _run_models(args, provider=""):
+        # provider is the opencode provider being listed (e.g. "anthropic")
+        # for env isolation; "" means generic listing (only OPENCODE_)
         try:
+            prov_model = (provider + "/x") if provider else ""
+            env = reviewer_env("opencode", prov_model)
             proc = subprocess.Popen(
                 [spec["bin"]] + args,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                env={k: v for k, v in os.environ.items()
-                     if k in ENV_KEEP or k.startswith("OPENCODE_")
-                     or k.startswith("LC_") or k.startswith("ANTHROPIC_")
-                     or k.startswith("OPENAI_") or k.startswith("GOOGLE_")
-                     or k.startswith("GEMINI_")},
+                env=env,
             )
-            out, _ = proc.communicate(timeout=6)
+            # Cap stdout while reading, not after, so a huge reply cannot be
+            # held whole. Reuse the same ceiling as agent replies.
+            capper = subprocess.Popen(
+                ["head", "-c", str(MAX_AGENT_BYTES)],
+                stdin=proc.stdout, stdout=subprocess.PIPE)
+            proc.stdout.close()
+            try:
+                out, _ = capper.communicate(timeout=6)
+            except subprocess.TimeoutExpired:
+                capper.kill()
+                out, _ = capper.communicate()
+                raise
+            finally:
+                if proc.poll() is None:
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2)
             if proc.returncode != 0:
-                return []
+                # head -c closes the pipe at the ceiling; the writer then
+                # gets SIGPIPE (141) which is not a real failure — it just
+                # means we stopped reading at the cap.
+                if len(out or b"") < MAX_AGENT_BYTES:
+                    return None
             lst = []
             for line in (out or b"").decode("utf-8", "replace").splitlines():
                 s = line.strip()
@@ -986,17 +1008,17 @@ def opencode_cli_models(spec):
                     lst.append(s)
             return lst
         except Exception:
-            return []
+            return None
 
     try:
         models = _run_models(["models"])
         if models is None:
             return None
-        # Si el usuario no usa Zen, los modelos de su provider no aparecen
-        # en el listado general. Intenta providers comunes si hay indicio
-        # de credencial (env o auth.json) para no dejar la lista vacía de
-        # su provider real. anthropic/openai/google se intentan siempre
-        # porque son los más comunes sin Zen.
+        # If the user does not use Zen, their provider's models do not appear
+        # in the general listing. Try common providers if there is a hint
+        # of a credential (env or auth.json) to avoid leaving their real
+        # provider's list empty. anthropic/openai/google are always tried
+        # because they are the most common without Zen.
         always = {"anthropic", "openai", "google"}
         if models == [] or any(m.startswith("opencode/") for m in models):
             for prov in ("anthropic", "openai", "google", "openrouter", "azure", "mistral", "groq", "deepseek", "xai", "cohere"):
@@ -1007,14 +1029,17 @@ def opencode_cli_models(spec):
                     try:
                         auth_path = os.path.join(HOME, ".local/share/opencode/auth.json")
                         if os.path.exists(auth_path):
-                            with open(auth_path, "r") as f:
-                                has_auth = prov in f.read().lower()
+                            raw = read_capped(auth_path, 64 * 1024, follow=True).decode("utf-8", "replace")
+                            has_auth = prov in raw.lower()
                     except Exception:
                         pass
                     should_try = has_env or has_auth
                 if not should_try:
                     continue
-                for m in _run_models(["models", prov]):
+                prov_models = _run_models(["models", prov], provider=prov)
+                if prov_models is None:
+                    continue
+                for m in prov_models:
                     if m not in models:
                         models.append(m)
         if not models:
@@ -1051,29 +1076,26 @@ def available_agents():
                 models = opencode_cli_models(spec)
                 if models is None:
                     continue
-                # El modelo por defecto es el que el usuario tenga configurado
-                # en opencode (opencode.json -> model), si existe y está
-                # disponible. Si no, se usa el default estático o el primero.
+                # The default model is the one the user has configured
+                # in opencode (opencode.json -> model), if it exists and is
+                # available. Otherwise the static default or the first one is used.
                 configured = ""
                 for cfg_path in (
                     os.path.join(HOME, ".config/opencode/opencode.json"),
                     os.path.join(HOME, ".config/opencode/opencode.jsonc"),
                 ):
-                    try:
-                        cfg = read_json(cfg_path, 64 * 1024, {}, follow=True)
-                        if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
-                            configured = cfg["model"].strip()
-                            if configured:
-                                break
-                    except Exception:
-                        continue
-                # OPENCODE_MODEL env también cuenta como configurado
+                    cfg = _load_opencode_config(cfg_path, 64 * 1024)
+                    if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
+                        configured = cfg["model"].strip()
+                        if configured:
+                            break
+                # OPENCODE_MODEL env also counts as configured
                 if not configured:
                     configured = os.environ.get("OPENCODE_MODEL", "").strip()
-                # Si no tienes Zen y tu default es de otro provider
+                # If you don't have Zen and your default is from another provider
                 # (anthropic/claude-*, openai/gpt-*, google/gemini-*...),
-                # debe respetarse igual aunque `opencode models` solo
-                # liste opencode/* por no haber filtrado por provider.
+                # it must still be respected even though `opencode models` only
+                # lists opencode/* because it wasn't filtered by provider.
                 if configured:
                     if configured not in models:
                         models = [configured] + models
@@ -1212,20 +1234,131 @@ ENV_KEEP = frozenset((
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "no_proxy",
 ))
+# Provider-specific env prefixes for opencode. Only OPENCODE_ is always
+# kept; provider credentials are added only for the model being used, so
+# e.g. opencode/* -> OPENCODE_, anthropic/* -> OPENCODE_+ANTHROPIC_, etc.
+# An unknown provider gets only OPENCODE_, so AWS_SECRET_ACCESS_KEY never
+# leaks into an opencode process that has no business seeing it.
+_PROVIDER_ENV_PREFIXES = {
+    "anthropic": ("ANTHROPIC_", "CLAUDE_"),
+    "openai": ("OPENAI_",),
+    "google": ("GOOGLE_", "GEMINI_"),
+    "gemini": ("GOOGLE_", "GEMINI_"),
+    "openrouter": ("OPENROUTER_",),
+    "azure": ("AZURE_",),
+    "mistral": ("MISTRAL_",),
+    "groq": ("GROQ_",),
+    "deepseek": ("DEEPSEEK_",),
+    "xai": ("XAI_",),
+    "cohere": ("COHERE_",),
+    "huggingface": ("HUGGINGFACE_", "HF_"),
+    "aws": ("AWS_",),
+    "bedrock": ("AWS_",),
+    "amazon": ("AWS_",),
+}
 ENV_KEEP_PREFIXES = {
     "claude": ("ANTHROPIC_", "CLAUDE_"),
     "codex": ("OPENAI_", "CODEX_"),
     "gemini": ("GEMINI_", "GOOGLE_"),
-    "opencode": (
-        "OPENCODE_", "ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_",
-        "CODEX_", "CLAUDE_", "COHERE_", "MISTRAL_", "GROQ_", "DEEPSEEK_",
-        "XAI_", "AZURE_", "AWS_", "OPENROUTER_", "HUGGINGFACE_", "HF_",
-    ),
+    "opencode": ("OPENCODE_",),  # base; provider prefixes added per-model
 }
 
 
-def reviewer_env(agent):
-    keep = ENV_KEEP_PREFIXES.get(agent, ())
+def _opencode_keep_for_model(model):
+    """Env prefixes to keep for an opencode model (e.g. anthropic/claude...).
+
+    Always keeps OPENCODE_. Adds provider-specific prefixes only for known
+    providers; unknown providers get only OPENCODE_ so unrelated secrets
+    (e.g. AWS_SECRET_ACCESS_KEY) are not exposed.
+    """
+    if not model or not isinstance(model, str):
+        return ("OPENCODE_",)
+    prov = model.split("/", 1)[0].strip().lower() if "/" in model else model.strip().lower()
+    if not prov or prov == "opencode":
+        return ("OPENCODE_",)
+    extra = _PROVIDER_ENV_PREFIXES.get(prov)
+    if extra:
+        return ("OPENCODE_",) + extra
+    return ("OPENCODE_",)
+
+
+def _strip_jsonc(text):
+    """Strip // and /* */ comments outside strings and trailing commas."""
+    out = []
+    in_str = False
+    str_char = ""
+    escaped = False
+    in_block = False
+    in_line = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if in_line:
+            if ch == "\n":
+                in_line = False
+                out.append(ch)
+            i += 1
+            continue
+        if in_block:
+            if ch == "*" and nxt == "/":
+                in_block = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_str:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == str_char:
+                in_str = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = True
+            str_char = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            in_line = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block = True
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    stripped = "".join(out)
+    stripped = re.sub(r",\s*([}\]])", r"\1", stripped)
+    return stripped
+
+
+def _load_opencode_config(path, ceiling=64 * 1024):
+    """Read an opencode.json / jsonc config, tolerating comments and trailing commas."""
+    try:
+        raw = read_capped(path, ceiling, follow=True).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        try:
+            return json.loads(_strip_jsonc(raw))
+        except ValueError:
+            return {}
+
+
+def reviewer_env(agent, model=""):
+    if agent == "opencode":
+        keep = _opencode_keep_for_model(model)
+    else:
+        keep = ENV_KEEP_PREFIXES.get(agent, ())
     env = {k: v for k, v in os.environ.items()
            if k in ENV_KEEP or k.startswith("LC_") or k.startswith(keep)}
     # Its own configuration and credentials live under the real home, so the
@@ -1497,11 +1630,12 @@ def run_agent(diff, scan_facts, plugin_name, context="update",
                 # mode; the empty working directory keeps even reads harmless.
                 # Prompt travels as an argument, trimmed to the OS limit so a
                 # large diff degrades gracefully rather than failing silently.
+                # "--" prevents a prompt starting with "-" being parsed as a flag.
                 cmd = ["opencode", "run", "--format", "json",
                        "--agent", "plan"]
                 if model:
                     cmd += ["-m", model]
-                cmd += [arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
+                cmd += ["--", arg_prompt(REVIEW_SYSTEM + "\n\n" + prompt)]
             else:
                 return offline_summary(diff, scan_facts, plugin_name, context)
 
@@ -1521,7 +1655,7 @@ def run_agent(diff, scan_facts, plugin_name, context="update",
                 proc = subprocess.Popen(
                     cmd, stdin=(stdin_file or subprocess.DEVNULL),
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    cwd=empty, env=reviewer_env(agent))
+                    cwd=empty, env=reviewer_env(agent, model))
                 if stdin_file is not None:
                     stdin_file.close()
                 try:
