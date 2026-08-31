@@ -133,7 +133,9 @@ tools you actually have:
 > environment as described above, and the list bounded at 100 models per
 > provider and 300 in total. They reach Opencode and those providers over the
 > network, and where a provider has credentials stored the request carries
-> them. Measured at roughly 13 seconds for the three unconditional providers.
+> them. How long that takes depends on your network and on how many providers
+> you have set up; each probe is given six seconds before it is abandoned, so
+> the whole run is bounded rather than open-ended.
 >
 > Plug writes the answer to `~/.local/state/plug/opencode_models.json` and
 > builds the picker from that file afterwards, so the cost is paid on the

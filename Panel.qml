@@ -887,7 +887,8 @@ Item {
     }
   }
   // Opencode discovery on explicit consent. Runs `opencode models` (+ per-provider
-  // probes) which may take ~13 s and contact providers; result is cached to
+  // probes), which contact providers and take as long as the network does —
+  // each probe is abandoned after six seconds, so the run is bounded; result is cached to
   // Plug's own state so the cost is paid once, not every boot.
   property bool opencodeDiscovering: false
   // set when a discovery succeeds, consumed by the agents reload it triggers
@@ -2416,13 +2417,13 @@ Item {
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
-              text: "Discovery runs `opencode models` plus per-provider probes (anthropic/openai/google always, others if env or ~/.local/share/opencode/auth.json suggests credentials). Each probe is 6 s timeout, stdout capped at 512 KB, 100 per provider / 300 total. Measured ~13 s for three unconditional providers; more credentials → more time. For providers that need credentials it runs with the trimmed per-model environment and may make authenticated network requests."
+              text: "Discovery runs `opencode models` plus per-provider probes (anthropic/openai/google always, others if env or ~/.local/share/opencode/auth.json suggests credentials). Each probe is given 6 s before it is abandoned, stdout capped at 512 KB, 100 models per provider / 300 total. The more providers you have set up, the longer it takes. For providers that need credentials it runs with the trimmed per-model environment and may make authenticated network requests."
             }
             Row {
               spacing: Style.space(8)
               PlugButton {
                 visible: !!(oc && !hasModels)
-                label: root.opencodeDiscovering ? "Discovering… (~13 s)" : "Set up Opencode — discover models (~10–15 s)"
+                label: root.opencodeDiscovering ? "asking opencode…" : "Set up Opencode — find available models"
                 onPicked: if (!root.opencodeDiscovering) root.discoverOpencode()
               }
               PlugButton {
