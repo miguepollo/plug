@@ -45,6 +45,11 @@ CATALOG_FILE = os.path.join(STATE_DIR, "catalog.json")
 # bookkeeping recorded by earlier versions survives the upgrade.
 HISTORY_FILE = os.path.join(STATE_DIR, "locks.json")
 SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
+# Opencode model list is cached on explicit user action, not at startup.
+# Discovery runs `opencode models` (+ per-provider probes) which may take
+# ~13 s and contact providers; it is not triggered by opening Settings or
+# at shell startup, only by the Set up / Refresh button in Settings.
+OPENCODE_CACHE_FILE = os.path.join(STATE_DIR, "opencode_models.json")
 
 # The AI reviewer is the user's choice, so a published Plug does not assume
 # anyone has a particular tool. Two kinds are supported:
@@ -1006,7 +1011,9 @@ def opencode_cli_models(spec):
                 s = line.strip()
                 if s and "/" in s and not s.startswith("#"):
                     lst.append(s)
-            return lst
+                    if len(lst) >= 100:
+                        break
+            return lst[:100]
         except Exception:
             return None
 
@@ -1014,6 +1021,10 @@ def opencode_cli_models(spec):
         models = _run_models(["models"])
         if models is None:
             return None
+        # Cap the base list and build a set for O(1) dedup.
+        if len(models) > 100:
+            models = models[:100]
+        seen = set(models)
         # If the user does not use Zen, their provider's models do not appear
         # in the general listing. Try common providers if there is a hint
         # of a credential (env or auth.json) to avoid leaving their real
@@ -1022,6 +1033,8 @@ def opencode_cli_models(spec):
         always = {"anthropic", "openai", "google"}
         if models == [] or any(m.startswith("opencode/") for m in models):
             for prov in ("anthropic", "openai", "google", "openrouter", "azure", "mistral", "groq", "deepseek", "xai", "cohere"):
+                if len(models) >= 300:
+                    break
                 should_try = prov in always
                 if not should_try:
                     has_env = any(prov in k.lower() for k in os.environ)
@@ -1030,7 +1043,15 @@ def opencode_cli_models(spec):
                         auth_path = os.path.join(HOME, ".local/share/opencode/auth.json")
                         if os.path.exists(auth_path):
                             raw = read_capped(auth_path, 64 * 1024, follow=True).decode("utf-8", "replace")
-                            has_auth = prov in raw.lower()
+                            try:
+                                doc = json.loads(raw)
+                            except ValueError:
+                                try:
+                                    doc = json.loads(_strip_jsonc(raw))
+                                except ValueError:
+                                    doc = None
+                            if isinstance(doc, dict):
+                                has_auth = prov in {k.lower() for k in doc.keys() if isinstance(k, str)}
                     except Exception:
                         pass
                     should_try = has_env or has_auth
@@ -1040,11 +1061,14 @@ def opencode_cli_models(spec):
                 if prov_models is None:
                     continue
                 for m in prov_models:
-                    if m not in models:
+                    if len(models) >= 300:
+                        break
+                    if m not in seen:
                         models.append(m)
+                        seen.add(m)
         if not models:
             return list(spec.get("models") or [])
-        return models
+        return models[:300]
     except Exception:
         return None
 
@@ -1065,7 +1089,13 @@ def available_agents():
     """Which reviewers are actually usable right now — CLIs that are installed
     and local servers that are running. The panel offers only these, plus
     'none', so a user never picks an agent they do not have. Local-server
-    models are read live from the server."""
+    models are read live from the server.
+
+    Opencode is treated like other CLIs here: presence is `which` only, no
+    `opencode models` probe and no outbound network. The full model list is
+    discovered on explicit user action (Set up / Refresh in Settings) and
+    cached to `opencode_models.json`; until then opencode appears with an
+    empty model list so the user can opt in."""
     out = []
     for key, spec in AGENTS.items():
         if spec["type"] == "cli":
@@ -1073,47 +1103,87 @@ def available_agents():
             if which(spec["bin"]) is None:
                 continue
             if key == "opencode":
-                models = opencode_cli_models(spec)
-                if models is None:
-                    continue
-                # The default model is the one the user has configured
-                # in opencode (opencode.json -> model), if it exists and is
-                # available. Otherwise the static default or the first one is used.
-                configured = ""
-                for cfg_path in (
-                    os.path.join(HOME, ".config/opencode/opencode.json"),
-                    os.path.join(HOME, ".config/opencode/opencode.jsonc"),
-                ):
-                    cfg = _load_opencode_config(cfg_path, 64 * 1024)
-                    if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
-                        configured = cfg["model"].strip()
-                        if configured:
-                            break
-                # OPENCODE_MODEL env also counts as configured
-                if not configured:
-                    configured = os.environ.get("OPENCODE_MODEL", "").strip()
-                # If you don't have Zen and your default is from another provider
-                # (anthropic/claude-*, openai/gpt-*, google/gemini-*...),
-                # it must still be respected even though `opencode models` only
-                # lists opencode/* because it wasn't filtered by provider.
-                if configured:
-                    if configured not in models:
-                        models = [configured] + models
-                    default = configured
+                # No network here — which only, like claude/codex/gemini.
+                # Cached models, if any, are read from Plug's own state.
+                cached = read_json(OPENCODE_CACHE_FILE, 64 * 1024, None)
+                models = []
+                cached_at = ""
+                if isinstance(cached, dict) and isinstance(cached.get("models"), list):
+                    models = [m for m in cached["models"]
+                              if isinstance(m, str) and "/" in m][:300]
+                    v = cached.get("fetchedAt")
+                    if isinstance(v, str):
+                        cached_at = v
+                # Only merge the user's configured default when we actually have
+                # a cached list; otherwise keep the list empty so Settings can
+                # show the explicit Set up button instead of hanging.
+                if models:
+                    configured = ""
+                    for cfg_path in (
+                        os.path.join(HOME, ".config/opencode/opencode.json"),
+                        os.path.join(HOME, ".config/opencode/opencode.jsonc"),
+                    ):
+                        cfg = _load_opencode_config(cfg_path, 64 * 1024)
+                        if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
+                            configured = cfg["model"].strip()
+                            if configured:
+                                break
+                    if not configured:
+                        configured = os.environ.get("OPENCODE_MODEL", "").strip()
+                    if configured:
+                        if configured not in models:
+                            models = [configured] + models
+                            if len(models) > 300:
+                                models = models[:300]
+                        default = configured
+                    else:
+                        dm = spec.get("default_model", "")
+                        default = dm if dm in models else (models[0] if models else dm)
                 else:
-                    dm = spec.get("default_model", "")
-                    default = dm if dm in models else (models[0] if models else dm)
+                    default = ""
+                entry = {"key": key, "label": spec["label"], "models": models,
+                         "defaultModel": default, "private": spec.get("private", False),
+                         "cachedAt": cached_at}
             else:
                 models = spec["models"]
                 default = spec["default_model"]
+                entry = {"key": key, "label": spec["label"], "models": models,
+                         "defaultModel": default, "private": spec.get("private", False)}
         else:
             models = http_agent_models(spec)
             if models is None:
                 continue
             default = models[0] if models else ""
-        out.append({"key": key, "label": spec["label"], "models": models,
-                    "defaultModel": default, "private": spec.get("private", False)})
+            entry = {"key": key, "label": spec["label"], "models": models,
+                     "defaultModel": default, "private": spec.get("private", False)}
+        out.append(entry)
     return out
+
+
+def discover_opencode_models():
+    """Run `opencode models` (+ per-provider probes) on explicit user action
+    and cache the result to Plug's own state.
+
+    This is the ONLY place that triggers outbound network to providers.
+    It is not called at startup nor when Settings opens — only when the user
+    presses Set up / Refresh in Settings. Result is cached so the cost is
+    paid once, not every boot. Stdout is capped via head -c and per-provider
+    / overall caps (100 / 300) bound memory."""
+    spec = AGENTS.get("opencode")
+    if not spec:
+        return {"ok": False, "error": "opencode not configured"}
+    if shutil.which(spec["bin"]) is None:
+        return {"ok": False, "error": "opencode not installed"}
+    models = opencode_cli_models(spec)
+    if models is None:
+        return {"ok": False, "error": "opencode models probe failed (no output or not authenticated)"}
+    # opencode_cli_models already caps per-provider 100 / overall 300 and
+    # falls back to spec models if discovery returned empty — cache that too.
+    capped = models[:300]
+    obj = {"models": capped, "fetchedAt": now_iso(), "count": len(capped)}
+    write_atomic(OPENCODE_CACHE_FILE, obj)
+    return {"ok": True, "models": obj["models"], "fetchedAt": obj["fetchedAt"],
+            "count": obj["count"]}
 
 
 def installed_ids():
@@ -1335,8 +1405,44 @@ def _strip_jsonc(text):
         out.append(ch)
         i += 1
     stripped = "".join(out)
-    stripped = re.sub(r",\s*([}\]])", r"\1", stripped)
-    return stripped
+    # Trailing commas: remove a comma that is followed only by whitespace and
+    # then } or ], but only when outside a string. The comment stripper already
+    # tracked string state; reuse the same discipline here — a blind regex
+    # over the whole text would mangle values containing ", }".
+    out2 = []
+    in_str = False
+    str_char = ""
+    escaped = False
+    i = 0
+    n = len(stripped)
+    while i < n:
+        ch = stripped[i]
+        if in_str:
+            out2.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == str_char:
+                in_str = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = True
+            str_char = ch
+            out2.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and stripped[j] in " \t\r\n":
+                j += 1
+            if j < n and stripped[j] in "}]":
+                i = j
+                continue
+        out2.append(ch)
+        i += 1
+    return "".join(out2)
 
 
 def _load_opencode_config(path, ceiling=64 * 1024):
@@ -2099,6 +2205,7 @@ def main():
     sub.add_parser("check-updates")
     sub.add_parser("catalog")
     sub.add_parser("agents")
+    sub.add_parser("opencode-discover")
     for name in ("scan", "review", "apply", "rollback", "forget"):
         p = sub.add_parser(name)
         p.add_argument("id")
@@ -2136,6 +2243,8 @@ def main():
             print(json.dumps({"ok": False, "error": str(e)[:200]}))
     elif args.cmd == "agents":
         print(json.dumps(available_agents()))
+    elif args.cmd == "opencode-discover":
+        print(json.dumps(discover_opencode_models()))
     elif args.cmd == "scan":
         inv = installed_ids()
         if args.id not in inv:

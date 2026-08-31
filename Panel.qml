@@ -851,6 +851,8 @@ Item {
     }
   }
   // Ask the engine which reviewers are actually installed.
+  // Opencode is included here with which only — no `opencode models` probe,
+  // no outbound network. The full list appears only after explicit Set up.
   Process {
     id: agentsProc
     command: ["python3", root.pluginDir + "/plugd.py", "agents"]
@@ -861,6 +863,37 @@ Item {
           var a = JSON.parse(text)
           if (Array.isArray(a)) root.availableAgents = a
         } catch (e) {}
+      }
+    }
+  }
+  // Opencode discovery on explicit consent. Runs `opencode models` (+ per-provider
+  // probes) which may take ~13 s and contact providers; result is cached to
+  // Plug's own state so the cost is paid once, not every boot.
+  property bool opencodeDiscovering: false
+  function discoverOpencode() {
+    if (root.opencodeDiscovering) return
+    root.opencodeDiscovering = true
+    root.noticeText = ""
+    opencodeDiscoverProc.running = false
+    opencodeDiscoverProc.running = true
+  }
+  Process {
+    id: opencodeDiscoverProc
+    command: ["python3", root.pluginDir + "/plugd.py", "opencode-discover"]
+    stdout: StdioCollector { id: opencodeDiscoverOut; waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: {
+      root.opencodeDiscovering = false
+      try {
+        var d = JSON.parse(opencodeDiscoverOut.text)
+        if (d.ok) {
+          root.noticeText = "Opencode models updated — " + d.count + " models"
+          agentsProc.running = false; agentsProc.running = true
+        } else {
+          root.noticeText = "Opencode setup failed: " + (d.error || "unknown error")
+        }
+      } catch (e) {
+        root.noticeText = "Opencode setup failed to parse result"
       }
     }
   }
@@ -2303,6 +2336,82 @@ Item {
                 Text { id: mdl; anchors.centerIn: parent; text: modelData; textFormat: Text.PlainText; color: root.settings.reviewModel === modelData ? root.selText : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setModel(modelData) }
               }
+            }
+          }
+          // Opencode explicit setup — consent belongs on the action, not on
+          // the panel. Settings opens with which only (like claude/codex/gemini):
+          // opencode appears with an empty list and a Set up button. No probe,
+          // no network until this is pressed. Result is cached to Plug's own
+          // state; Refresh re-runs the same discovery.
+          Column {
+            visible: root.settings.reviewAgent === "opencode"
+            width: parent.width
+            spacing: Style.space(6)
+            // look up the opencode entry without a helper function so QML
+            // re-evaluates when availableAgents changes
+            property var oc: {
+              for (var i = 0; i < root.availableAgents.length; i++)
+                if (root.availableAgents[i].key === "opencode") return root.availableAgents[i]
+              return null
+            }
+            property bool hasModels: oc && oc.models && oc.models.length > 0
+            Text {
+              width: card.width - Style.space(60)
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              text: {
+                if (!oc) return "Opencode not installed — install the `opencode` command to use it."
+                if (hasModels) {
+                  var at = oc.cachedAt || ""
+                  var when = at ? at.slice(0,19).replace("T"," ") : ""
+                  return when ? "Models cached " + when + " — Refresh re-runs discovery." : "Models cached — Refresh re-runs discovery."
+                }
+                return "Opencode needs explicit setup before its model list appears. Nothing has run yet and nothing has left this machine."
+              }
+            }
+            Text {
+              visible: oc && !hasModels
+              width: card.width - Style.space(60)
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              text: "Discovery runs `opencode models` plus per-provider probes (anthropic/openai/google always, others if env or ~/.local/share/opencode/auth.json suggests credentials). Each probe is 6 s timeout, stdout capped at 512 KB, 100 per provider / 300 total. Measured ~13 s for three unconditional providers; more credentials → more time. For providers that need credentials it runs with the trimmed per-model environment and may make authenticated network requests."
+            }
+            Row {
+              spacing: Style.space(8)
+              PlugButton {
+                visible: oc && !hasModels
+                label: root.opencodeDiscovering ? "Discovering… (~13 s)" : "Set up Opencode — discover models (~10–15 s)"
+                onPicked: if (!root.opencodeDiscovering) root.discoverOpencode()
+              }
+              PlugButton {
+                visible: oc && hasModels
+                label: root.opencodeDiscovering ? "Refreshing…" : "Refresh models"
+                onPicked: if (!root.opencodeDiscovering) root.discoverOpencode()
+              }
+              Text {
+                visible: root.opencodeDiscovering
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Running opencode models…"
+                textFormat: Text.PlainText
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+            Text {
+              visible: hasModels && oc && oc.models.length > 0
+              width: card.width - Style.space(60)
+              text: oc ? oc.models.length + " models cached" + (oc.cachedAt ? " · " + oc.cachedAt.slice(0,10) : "") : ""
+              textFormat: Text.PlainText
+              color: root.fainter
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
         }
