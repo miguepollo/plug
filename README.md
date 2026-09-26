@@ -119,8 +119,9 @@ tools you actually have:
   that one has no installed Opencode however many times it has been used.
   `mise use -g opencode` is the answer in both cases.
 - **Cursor CLI** — if the `cursor-agent` command is installed and starts, and
-  `bwrap` (bubblewrap) is installed. Cursor CLI keeps its tools, so it runs
-  inside the same sandbox as Opencode: a read-only system, a home that exists
+  `bwrap` (bubblewrap) is installed. Ask mode does not edit, but Cursor CLI
+  can still read your files, so it runs inside the same sandbox as Opencode:
+  a read-only system, a home that exists
   only in memory, and nothing of yours inside it but Cursor CLI itself and
   the account it already has (`~/.config/cursor/auth.json`, read-only). It is
   started once, in ask mode, which does not edit, with its own sandbox turned

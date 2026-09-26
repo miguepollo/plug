@@ -1097,11 +1097,13 @@ def agent_hints(agents):
             "time rather than being it, and Plug will not fetch a program "
             "in order to run a review. Install it once and it appears here.",
             "Cursor CLI needs bubblewrap",
-            "Cursor CLI keeps its own tools, so Plug only runs it inside a "
-            "sandbox. Install bubblewrap and it appears here.",
+            "Ask mode does not edit, but Cursor CLI can still read your "
+            "files. Plug only runs it inside a sandbox, so the code it is "
+            "judging cannot reach the rest of your machine. Install "
+            "bubblewrap and it appears here.",
             "mise use -g cursor-agent",
-            " Cursor CLI also runs only inside a sandbox, so it needs the "
-            "`bubblewrap` package as well."),
+            " Ask mode does not edit, but Cursor CLI can still read your "
+            "files, so it also needs the `bubblewrap` package."),
     ):
         if hint:
             hints.append(hint)
